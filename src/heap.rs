@@ -173,7 +173,7 @@ mod tests {
 
         // Allocate some objects
         let obj1 = heap.allocate(Object::String("one".into()));
-        let obj2 = heap.allocate(Object::String("two".into()));
+        let _ = heap.allocate(Object::String("two".into()));
 
         // Only obj1 is a root
         let roots = vec![obj1.clone()];
