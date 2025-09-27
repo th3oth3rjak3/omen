@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Keyword {
     If,
     Else,
@@ -13,11 +13,11 @@ pub enum Keyword {
     Fun,
 }
 
-impl TryInto<Keyword> for String {
+impl TryFrom<&str> for Keyword {
     type Error = String;
 
-    fn try_into(self) -> Result<Keyword, Self::Error> {
-        match self.as_ref() {
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
             "if" => Ok(Keyword::If),
             "else" => Ok(Keyword::Else),
             "class" => Ok(Keyword::Class),
@@ -29,7 +29,7 @@ impl TryInto<Keyword> for String {
             "while" => Ok(Keyword::While),
             "for" => Ok(Keyword::For),
             "fun" => Ok(Keyword::Fun),
-            _ => Err(format!("{self} is not a keyword")),
+            _ => Err(format!("{value} is not a keyword")),
         }
     }
 }

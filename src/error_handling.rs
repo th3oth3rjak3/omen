@@ -16,9 +16,9 @@ impl Default for Position {
 }
 
 impl Position {
-    pub fn new(row: usize, column: usize, offset: usize) -> Self {
+    pub fn new(line: usize, column: usize, offset: usize) -> Self {
         Self {
-            line: row,
+            line,
             column,
             offset,
         }
