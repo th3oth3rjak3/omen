@@ -59,6 +59,10 @@ impl Lexer {
             return self.handle_numbers();
         }
 
+        if current == '"' {
+            return self.handle_string_literal();
+        }
+
         match current {
             // delimiters
             '(' => self.make_single(TokenKind::Delimiter(Delimiter::LeftParen)),
@@ -107,6 +111,7 @@ impl Lexer {
                 _ => self.make_single(TokenKind::Operator(Operator::Greater)),
             },
             '.' => self.make_single(TokenKind::Operator(Operator::Dot)),
+            '?' => self.make_single(TokenKind::Operator(Operator::Question)),
             _ => self.make_error_token(format!("Unexpected character '{current}'")),
         }
     }
@@ -150,6 +155,30 @@ impl Lexer {
         let span = Span::new(start, Some(self.position()));
         let literal: String = self.source[start.offset..self.offset].iter().collect();
         Token::new(TokenKind::Number(literal), span)
+    }
+
+    fn handle_string_literal(&mut self) -> Token {
+        self.advance(); // skip "
+        let start = self.position();
+
+        while !self.is_at_end() && self.peek() != '"' {
+            self.advance();
+        }
+
+        if self.peek() != '"' {
+            return self.make_error_token("unterminated string literal".into());
+        }
+
+        let end = self.position();
+        let span = Span::new(start, Some(end));
+        let literal = self.source[start.offset..end.offset]
+            .iter()
+            .collect::<String>();
+
+        let tok = Token::new(TokenKind::String(literal), span);
+
+        self.advance(); // advance over the " for the next token
+        return tok;
     }
 
     fn position(&mut self) -> Position {
@@ -313,7 +342,7 @@ mod tests {
 
     #[test]
     pub fn lexer_can_tokenize_all_operators() {
-        let source = "+ += - -= * *= / /= = == ! != < <= > >= . -> =>";
+        let source = "+ += - -= * *= / /= = == ! != < <= > >= . -> => ?";
         let mut lexer = Lexer::default();
         lexer.source = source.chars().collect();
 
@@ -339,6 +368,7 @@ mod tests {
         assert!(tokens[16].kind.is_operator(Operator::Dot));
         assert!(tokens[17].kind.is_operator(Operator::Arrow));
         assert!(tokens[18].kind.is_operator(Operator::FatArrow));
+        assert!(tokens[19].kind.is_operator(Operator::Question));
     }
 
     #[test]
@@ -360,5 +390,14 @@ mod tests {
         let mut lexer = Lexer::default();
         let tokens = lexer.tokenize();
         assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
+    }
+
+    #[test]
+    pub fn lexer_handles_string_literals() {
+        let mut lexer = Lexer::default();
+        lexer.source = r#""a raw string""#.chars().collect();
+        let tokens = lexer.tokenize();
+        assert_eq!(2, tokens.len());
+        assert_eq!(TokenKind::String("a raw string".into()), tokens[0].kind);
     }
 }

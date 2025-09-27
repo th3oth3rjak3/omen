@@ -3,6 +3,7 @@ use crate::{error_handling::Span, keywords::Keyword};
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Number(String),
+    String(String),
     Identifier(String),
     Keyword(Keyword),
     Operator(Operator),
@@ -61,6 +62,7 @@ pub enum Operator {
     Dot,
     Arrow,
     FatArrow,
+    Question,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

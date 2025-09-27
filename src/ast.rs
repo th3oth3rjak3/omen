@@ -2,13 +2,15 @@ use crate::types::Type;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
-    pub items: Vec<Item>,
+    pub statements: Vec<Statement>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Item {
-    Function(FunctionDecl),
-    Class(ClassDecl),
+impl Default for Program {
+    fn default() -> Self {
+        Self {
+            statements: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,13 +46,16 @@ pub struct Block {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
-    Expression(Expression),
-    Return(Option<Expression>),
-    Let {
+    VarDeclaration {
         name: String,
         type_annotation: Type,
         initializer: Expression,
     },
+    Assignment {
+        name: String,
+        value: Expression,
+    },
+    ExpressionStatement(Expression),
 }
 
 #[derive(Debug, Clone, PartialEq, Copy)]
@@ -71,12 +76,15 @@ pub enum BinaryOperator {
     GreaterEqual,
     Equal,
     NotEqual,
+    LogicalAnd,
+    LogicalOr,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
     Number(f64),
     Bool(bool),
+    String(String),
     Identifier(String),
     Unary {
         operator: UnaryOperator,

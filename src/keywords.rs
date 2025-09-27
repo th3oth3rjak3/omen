@@ -15,6 +15,8 @@ pub enum Keyword {
     Super,
     True,
     False,
+    And,
+    Or,
 }
 
 impl TryFrom<&str> for Keyword {
@@ -37,6 +39,8 @@ impl TryFrom<&str> for Keyword {
             "super" => Ok(Keyword::Super),
             "true" => Ok(Keyword::True),
             "false" => Ok(Keyword::False),
+            "and" => Ok(Keyword::And),
+            "or" => Ok(Keyword::Or),
             _ => Err(format!("{value} is not a keyword")),
         }
     }
