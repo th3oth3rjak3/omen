@@ -50,6 +50,14 @@ pub enum Type {
 }
 
 impl Type {
+    fn is_nullable(&self) -> bool {
+        if let Type::Nullable(_) = self {
+            return true;
+        }
+
+        false
+    }
+
     /// Check if this type is assignable to another type.
     pub fn is_assignable_to(&self, other: &Type) -> bool {
         match (self, other) {
@@ -102,7 +110,7 @@ impl Type {
                 let params_ok = params1
                     .iter()
                     .zip(params2.iter())
-                    .all(|(self_param, other_param)| other_param.is_assignable_to(self_param));
+                    .all(|(self_param, other_param)| self_param.is_assignable_to(other_param));
 
                 // Return types are covariant: self return type must be a subtype of other return type
                 let returns_ok = returns1
@@ -113,7 +121,6 @@ impl Type {
                 params_ok && returns_ok
             }
 
-            (a, b) if a == b => true,
             (Type::Class(a_name), Type::Class(b_name)) => {
                 if a_name == b_name {
                     true
@@ -129,8 +136,16 @@ impl Type {
             // nil can be assigned to any nullable type
             (Type::Nil, Type::Nullable(_)) => true,
 
+            (Type::Nullable(a), b) if !b.is_nullable() => {
+                println!("a {:#?}, b {:#?}", a, b);
+                false
+            }
+            (Type::Nullable(a), Type::Nullable(b)) => a.is_assignable_to(b),
+
             // Allow non-null assignment to nullable of same type.
             (a, Type::Nullable(nullable_inner)) => a.is_assignable_to(&nullable_inner),
+
+            (a, b) if a == b => true,
 
             // Nothing else is assignable.
             _ => false,
@@ -649,7 +664,7 @@ mod tests {
         };
 
         // These should NOT be assignable
-        assert!(!nullable_param.is_assignable_to(&non_nullable_param));
+        assert_eq!(false, nullable_param.is_assignable_to(&non_nullable_param));
     }
 
     #[test]
@@ -666,8 +681,7 @@ mod tests {
             return_types: vec![Box::new(Type::Nullable(Box::new(Type::String)))],
         };
 
-        // These should NOT be assignable - return types must match exactly
-        assert!(!non_nullable_return.is_assignable_to(&nullable_return));
+        assert!(non_nullable_return.is_assignable_to(&nullable_return));
         assert!(!nullable_return.is_assignable_to(&non_nullable_return));
     }
 
