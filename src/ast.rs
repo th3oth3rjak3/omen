@@ -59,6 +59,20 @@ pub enum UnaryOperator {
     Not,
 }
 
+#[derive(Debug, Clone, PartialEq, Copy)]
+pub enum BinaryOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Equal,
+    NotEqual,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
     Number(f64),
@@ -67,6 +81,11 @@ pub enum Expression {
     Unary {
         operator: UnaryOperator,
         operand: Box<Expression>,
+    },
+    Binary {
+        left: Box<Expression>,
+        operator: BinaryOperator,
+        right: Box<Expression>,
     },
     Nil,
 }

@@ -1,5 +1,5 @@
 use crate::{
-    ast::{Expression, UnaryOperator},
+    ast::{BinaryOperator, Expression, UnaryOperator},
     error_handling::Span,
     keywords::Keyword,
     tokens::{Delimiter, Operator, Special, Token, TokenKind},
@@ -25,19 +25,140 @@ impl Parser {
     }
 
     fn parse_equality(&mut self) -> Expression {
-        self.parse_comparison()
+        let mut expr = self.parse_comparison(); // left operand.
+        while let TokenKind::Operator(op) = self.peek().kind {
+            match op {
+                Operator::EqualEqual => {
+                    self.advance(); // consume '=='
+                    let right = self.parse_comparison(); // Get right operand
+                    expr = Expression::Binary {
+                        left: Box::new(expr),
+                        operator: BinaryOperator::Equal,
+                        right: Box::new(right),
+                    };
+                }
+                Operator::BangEqual => {
+                    self.advance(); // consume '!='
+                    let right = self.parse_comparison();
+                    expr = Expression::Binary {
+                        left: Box::new(expr),
+                        operator: BinaryOperator::NotEqual,
+                        right: Box::new(right),
+                    };
+                }
+                _ => break, // Not a comparison operator
+            }
+        }
+
+        expr
     }
 
     fn parse_comparison(&mut self) -> Expression {
-        self.parse_term()
+        let mut expr = self.parse_term(); // Get left operand
+
+        while let TokenKind::Operator(op) = self.peek().kind {
+            match op {
+                Operator::Less => {
+                    self.advance(); // consume '<'
+                    let right = self.parse_term(); // Get right operand
+                    expr = Expression::Binary {
+                        left: Box::new(expr),
+                        operator: BinaryOperator::Less,
+                        right: Box::new(right),
+                    };
+                }
+                Operator::LessEqual => {
+                    self.advance(); // consume '<='
+                    let right = self.parse_term();
+                    expr = Expression::Binary {
+                        left: Box::new(expr),
+                        operator: BinaryOperator::LessEqual,
+                        right: Box::new(right),
+                    };
+                }
+                Operator::Greater => {
+                    self.advance(); // consume '>'
+                    let right = self.parse_term();
+                    expr = Expression::Binary {
+                        left: Box::new(expr),
+                        operator: BinaryOperator::Greater,
+                        right: Box::new(right),
+                    };
+                }
+                Operator::GreaterEqual => {
+                    self.advance(); // consume '>='
+                    let right = self.parse_term();
+                    expr = Expression::Binary {
+                        left: Box::new(expr),
+                        operator: BinaryOperator::GreaterEqual,
+                        right: Box::new(right),
+                    };
+                }
+                _ => break, // Not a comparison operator
+            }
+        }
+
+        expr
     }
 
     fn parse_term(&mut self) -> Expression {
-        self.parse_factor()
+        let mut expr = self.parse_factor(); // Get left operand
+
+        while let TokenKind::Operator(op) = self.peek().kind {
+            match op {
+                Operator::Plus => {
+                    self.advance(); // consume '+'
+                    let right = self.parse_factor(); // Get right operand
+                    expr = Expression::Binary {
+                        left: Box::new(expr),
+                        operator: BinaryOperator::Add,
+                        right: Box::new(right),
+                    };
+                }
+                Operator::Minus => {
+                    self.advance(); // consume '-'
+                    let right = self.parse_factor();
+                    expr = Expression::Binary {
+                        left: Box::new(expr),
+                        operator: BinaryOperator::Subtract,
+                        right: Box::new(right),
+                    };
+                }
+                _ => break, // Not a term-level operator
+            }
+        }
+
+        expr
     }
 
     fn parse_factor(&mut self) -> Expression {
-        self.parse_unary()
+        let mut expr = self.parse_unary(); // Get left operand
+
+        while let TokenKind::Operator(op) = self.peek().kind {
+            match op {
+                Operator::Star => {
+                    self.advance(); // consume '*'
+                    let right = self.parse_unary(); // Get right operand
+                    expr = Expression::Binary {
+                        left: Box::new(expr),
+                        operator: BinaryOperator::Multiply,
+                        right: Box::new(right),
+                    };
+                }
+                Operator::Slash => {
+                    self.advance(); // consume '/'
+                    let right = self.parse_unary();
+                    expr = Expression::Binary {
+                        left: Box::new(expr),
+                        operator: BinaryOperator::Divide,
+                        right: Box::new(right),
+                    };
+                }
+                _ => break, // Not a factor-level operator
+            }
+        }
+
+        expr
     }
 
     fn parse_unary(&mut self) -> Expression {
@@ -107,7 +228,13 @@ impl Parser {
     }
 
     fn handle_identifier(&mut self) -> Expression {
-        todo!("Not ready yet")
+        if let TokenKind::Identifier(name) = &self.peek().kind {
+            let identifier = name.clone();
+            self.advance();
+            Expression::Identifier(identifier)
+        } else {
+            panic!("Expected identifier");
+        }
     }
 
     fn handle_grouped_expression(&mut self) -> Expression {
@@ -238,6 +365,120 @@ mod tests {
             Expression::Unary {
                 operator: UnaryOperator::Negate,
                 operand: Box::new(Expression::Number(5.))
+            },
+            ast
+        );
+    }
+
+    #[test]
+    pub fn parser_can_parse_simple_binary_factor() {
+        let mut lexer = Lexer::default();
+        lexer.source = "1 * 2".chars().collect();
+
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse();
+
+        assert_eq!(
+            Expression::Binary {
+                left: Box::new(Expression::Number(1.)),
+                operator: BinaryOperator::Multiply,
+                right: Box::new(Expression::Number(2.))
+            },
+            ast
+        );
+    }
+
+    #[test]
+    pub fn parser_can_parse_simple_binary_term() {
+        let mut lexer = Lexer::default();
+        lexer.source = "1 - 2".chars().collect();
+
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse();
+
+        assert_eq!(
+            Expression::Binary {
+                left: Box::new(Expression::Number(1.)),
+                operator: BinaryOperator::Subtract,
+                right: Box::new(Expression::Number(2.))
+            },
+            ast
+        );
+    }
+
+    #[test]
+    pub fn parser_can_parse_simple_comparison() {
+        let mut lexer = Lexer::default();
+        lexer.source = "5 < 10".chars().collect();
+
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse();
+
+        assert_eq!(
+            Expression::Binary {
+                left: Box::new(Expression::Number(5.)),
+                operator: BinaryOperator::Less,
+                right: Box::new(Expression::Number(10.))
+            },
+            ast
+        );
+    }
+
+    #[test]
+    pub fn parser_can_parse_equality_when_equal() {
+        let mut lexer = Lexer::default();
+        lexer.source = "5 == 10".chars().collect();
+
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse();
+
+        assert_eq!(
+            Expression::Binary {
+                left: Box::new(Expression::Number(5.)),
+                operator: BinaryOperator::Equal,
+                right: Box::new(Expression::Number(10.))
+            },
+            ast
+        );
+    }
+
+    #[test]
+    pub fn parser_can_parse_equality_when_not_equal() {
+        let mut lexer = Lexer::default();
+        lexer.source = "5 != 10".chars().collect();
+
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse();
+
+        assert_eq!(
+            Expression::Binary {
+                left: Box::new(Expression::Number(5.)),
+                operator: BinaryOperator::NotEqual,
+                right: Box::new(Expression::Number(10.))
+            },
+            ast
+        );
+    }
+
+    #[test]
+    pub fn parser_can_parse_basic_identifiers() {
+        let mut lexer = Lexer::default();
+        lexer.source = "someIdent != 10".chars().collect();
+
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse();
+
+        assert_eq!(
+            Expression::Binary {
+                left: Box::new(Expression::Identifier("someIdent".into())),
+                operator: BinaryOperator::NotEqual,
+                right: Box::new(Expression::Number(10.))
             },
             ast
         );
