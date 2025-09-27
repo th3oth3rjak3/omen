@@ -4,6 +4,7 @@ pub mod keywords;
 pub mod lexer;
 pub mod object;
 pub mod tokens;
+pub mod types;
 pub mod value;
 
 fn main() {
