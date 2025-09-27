@@ -1,0 +1,807 @@
+use lazy_static::lazy_static;
+use std::collections::HashMap;
+use std::sync::RwLock;
+
+lazy_static! {
+    static ref CLASS_REGISTRY: RwLock<HashMap<String, ClassInfo>> = RwLock::new(HashMap::new());
+}
+
+struct ClassInfo {
+    name: String,
+    superclass: Option<String>,
+}
+
+impl ClassInfo {
+    fn is_subtype_of(&self, parent: &str) -> bool {
+        let mut current = self.superclass.clone();
+
+        while let Some(super_name) = current {
+            if super_name == parent {
+                return true;
+            }
+            current = CLASS_REGISTRY
+                .read()
+                .unwrap()
+                .get(&super_name)
+                .and_then(|ci| ci.superclass.clone());
+        }
+
+        false
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Type {
+    Int,
+    Float,
+    Bool,
+    String,
+    Nil,
+    Tuple(Vec<Box<Type>>),
+    NamedTuple(Vec<(String, Box<Type>)>),
+    Function {
+        params: Vec<Box<Type>>,
+        return_types: Vec<Box<Type>>,
+    },
+    // User-defined types.
+    Class(String), // String is the fully-qualified class name.
+    // Nullable Wrapper
+    Nullable(Box<Type>),
+}
+
+impl Type {
+    /// Check if this type is assignable to another type.
+    pub fn is_assignable_to(&self, other: &Type) -> bool {
+        match (self, other) {
+            (Type::Tuple(elements_1), Type::Tuple(elements_2)) => {
+                elements_1.len() == elements_2.len()
+                    && elements_1
+                        .iter()
+                        .zip(elements_2.iter())
+                        .all(|(el_1_type, el_2_type)| el_1_type.is_assignable_to(el_2_type))
+            }
+            (Type::NamedTuple(elements_1), Type::NamedTuple(elements_2)) => {
+                elements_1.len() == elements_2.len()
+                    && elements_1.iter().zip(elements_2.iter()).all(
+                        |((_, el_1_type), (_, el_2_type))| el_1_type.is_assignable_to(el_2_type),
+                    )
+            }
+            (Type::NamedTuple(named_elements), Type::Tuple(elements)) => {
+                named_elements.len() == elements.len()
+                    && named_elements.iter().zip(elements.iter()).all(
+                        |((_, named_element_type), element_type)| {
+                            named_element_type.is_assignable_to(element_type)
+                        },
+                    )
+            }
+
+            (Type::Tuple(elements), Type::NamedTuple(named_elements)) => {
+                elements.len() == named_elements.len()
+                    && elements.iter().zip(named_elements.iter()).all(
+                        |(element_type, (_, named_element_type))| {
+                            element_type.is_assignable_to(named_element_type)
+                        },
+                    )
+            }
+            (
+                Type::Function {
+                    params: params1,
+                    return_types: returns1,
+                },
+                Type::Function {
+                    params: params2,
+                    return_types: returns2,
+                },
+            ) => {
+                // Same number of parameters and return values
+                if params1.len() != params2.len() || returns1.len() != returns2.len() {
+                    return false;
+                }
+
+                // Parameters are contravariant: self param type must be a supertype of other param type
+                let params_ok = params1
+                    .iter()
+                    .zip(params2.iter())
+                    .all(|(self_param, other_param)| other_param.is_assignable_to(self_param));
+
+                // Return types are covariant: self return type must be a subtype of other return type
+                let returns_ok = returns1
+                    .iter()
+                    .zip(returns2.iter())
+                    .all(|(self_ret, other_ret)| self_ret.is_assignable_to(other_ret));
+
+                params_ok && returns_ok
+            }
+
+            (a, b) if a == b => true,
+            (Type::Class(a_name), Type::Class(b_name)) => {
+                if a_name == b_name {
+                    true
+                } else {
+                    CLASS_REGISTRY
+                        .read()
+                        .unwrap()
+                        .get(a_name)
+                        .map_or(false, |class_info| class_info.is_subtype_of(b_name))
+                }
+            }
+
+            // nil can be assigned to any nullable type
+            (Type::Nil, Type::Nullable(_)) => true,
+
+            // Allow non-null assignment to nullable of same type.
+            (a, Type::Nullable(nullable_inner)) => a.is_assignable_to(&nullable_inner),
+
+            // Nothing else is assignable.
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exact_type_matches() {
+        // Built-in types should match themselves
+        assert!(Type::Int.is_assignable_to(&Type::Int));
+        assert!(Type::Float.is_assignable_to(&Type::Float));
+        assert!(Type::Bool.is_assignable_to(&Type::Bool));
+        assert!(Type::String.is_assignable_to(&Type::String));
+        assert!(Type::Nil.is_assignable_to(&Type::Nil));
+
+        // Class types should match themselves
+        let point = Type::Class("Point".to_string());
+        assert!(point.is_assignable_to(&point));
+
+        // Different classes should not match
+        let point = Type::Class("Point".to_string());
+        let rectangle = Type::Class("Rectangle".to_string());
+        assert!(!point.is_assignable_to(&rectangle));
+    }
+
+    #[test]
+    fn test_nil_to_nullable_assignment() {
+        // nil can be assigned to any nullable type
+        assert!(Type::Nil.is_assignable_to(&Type::Nullable(Box::new(Type::Int))));
+        assert!(Type::Nil.is_assignable_to(&Type::Nullable(Box::new(Type::String))));
+        assert!(Type::Nil.is_assignable_to(&Type::Nullable(Box::new(Type::Bool))));
+
+        // nil can be assigned to nullable class types
+        let nullable_point = Type::Nullable(Box::new(Type::Class("Point".to_string())));
+        assert!(Type::Nil.is_assignable_to(&nullable_point));
+
+        // nil cannot be assigned to non-nullable types
+        assert!(!Type::Nil.is_assignable_to(&Type::Int));
+        assert!(!Type::Nil.is_assignable_to(&Type::String));
+        assert!(!Type::Nil.is_assignable_to(&Type::Class("Point".to_string())));
+    }
+
+    #[test]
+    fn test_non_null_to_nullable_assignment() {
+        // Built-in types can be assigned to their nullable versions
+        assert!(Type::Int.is_assignable_to(&Type::Nullable(Box::new(Type::Int))));
+        assert!(Type::String.is_assignable_to(&Type::Nullable(Box::new(Type::String))));
+        assert!(Type::Bool.is_assignable_to(&Type::Nullable(Box::new(Type::Bool))));
+
+        // Class types can be assigned to their nullable versions
+        let point = Type::Class("Point".to_string());
+        let nullable_point = Type::Nullable(Box::new(Type::Class("Point".to_string())));
+        assert!(point.is_assignable_to(&nullable_point));
+
+        // Wrong types cannot be assigned to nullable of different type
+        assert!(!Type::Int.is_assignable_to(&Type::Nullable(Box::new(Type::String))));
+        assert!(!Type::String.is_assignable_to(&Type::Nullable(Box::new(Type::Int))));
+    }
+
+    #[test]
+    fn test_nullable_cannot_be_assigned_to_non_nullable() {
+        // Nullable types cannot be assigned to non-nullable versions
+        let nullable_int = Type::Nullable(Box::new(Type::Int));
+        assert!(!nullable_int.is_assignable_to(&Type::Int));
+
+        let nullable_string = Type::Nullable(Box::new(Type::String));
+        assert!(!nullable_string.is_assignable_to(&Type::String));
+
+        // Nullable classes cannot be assigned to non-nullable classes
+        let nullable_point = Type::Nullable(Box::new(Type::Class("Point".to_string())));
+        let point = Type::Class("Point".to_string());
+        assert!(!nullable_point.is_assignable_to(&point));
+    }
+
+    #[test]
+    fn test_nullable_type_equality() {
+        // Nullable types should be equal to themselves
+        let nullable_int = Type::Nullable(Box::new(Type::Int));
+        let another_nullable_int = Type::Nullable(Box::new(Type::Int));
+        assert!(nullable_int.is_assignable_to(&another_nullable_int));
+
+        // Different nullable types should not be equal
+        let nullable_int = Type::Nullable(Box::new(Type::Int));
+        let nullable_string = Type::Nullable(Box::new(Type::String));
+        assert!(!nullable_int.is_assignable_to(&nullable_string));
+
+        // Nullable class types
+        let nullable_point = Type::Nullable(Box::new(Type::Class("Point".to_string())));
+        let another_nullable_point = Type::Nullable(Box::new(Type::Class("Point".to_string())));
+        assert!(nullable_point.is_assignable_to(&another_nullable_point));
+    }
+
+    #[test]
+    fn test_incompatible_type_assignments() {
+        // Built-in types cannot be assigned to each other
+        assert!(!Type::Int.is_assignable_to(&Type::Float));
+        assert!(!Type::Int.is_assignable_to(&Type::String));
+        assert!(!Type::Bool.is_assignable_to(&Type::Int));
+        assert!(!Type::String.is_assignable_to(&Type::Bool));
+
+        // Classes cannot be assigned to built-in types
+        let point = Type::Class("Point".to_string());
+        assert!(!point.is_assignable_to(&Type::Int));
+        assert!(!point.is_assignable_to(&Type::String));
+        assert!(!Type::String.is_assignable_to(&point));
+
+        // Different classes cannot be assigned to each other
+        let point = Type::Class("Point".to_string());
+        let rectangle = Type::Class("Rectangle".to_string());
+        assert!(!point.is_assignable_to(&rectangle));
+        assert!(!rectangle.is_assignable_to(&point));
+    }
+
+    #[test]
+    fn test_fully_qualified_class_names() {
+        // Different fully-qualified names should be different types
+        let local_point = Type::Class("Point".to_string());
+        let graphics_point = Type::Class("graphics.Point".to_string());
+        let math_point = Type::Class("math.Point".to_string());
+
+        assert!(!local_point.is_assignable_to(&graphics_point));
+        assert!(!graphics_point.is_assignable_to(&math_point));
+        assert!(!math_point.is_assignable_to(&local_point));
+
+        // But same fully-qualified names should match
+        let point1 = Type::Class("graphics.Point".to_string());
+        let point2 = Type::Class("graphics.Point".to_string());
+        assert!(point1.is_assignable_to(&point2));
+    }
+
+    #[test]
+    fn test_nullable_class_types() {
+        let point = Type::Class("Point".to_string());
+        let nullable_point = Type::Nullable(Box::new(Type::Class("Point".to_string())));
+
+        // Point can be assigned to Point?
+        assert!(point.is_assignable_to(&nullable_point));
+
+        // Point? cannot be assigned to Point
+        assert!(!nullable_point.is_assignable_to(&point));
+
+        // nil can be assigned to Point?
+        assert!(Type::Nil.is_assignable_to(&nullable_point));
+    }
+
+    #[test]
+    fn test_tuple_types() {
+        // Empty tuple (unit type)
+        let unit = Type::Tuple(vec![]);
+        assert!(unit.is_assignable_to(&unit));
+
+        // Simple tuple
+        let int_string_tuple = Type::Tuple(vec![Box::new(Type::Int), Box::new(Type::String)]);
+
+        // Same tuple structure should match
+        let another_int_string_tuple =
+            Type::Tuple(vec![Box::new(Type::Int), Box::new(Type::String)]);
+        assert!(int_string_tuple.is_assignable_to(&another_int_string_tuple));
+
+        // Different tuple structures should not match
+        let string_int_tuple = Type::Tuple(vec![Box::new(Type::String), Box::new(Type::Int)]);
+        assert!(!int_string_tuple.is_assignable_to(&string_int_tuple));
+    }
+
+    #[test]
+    fn test_named_tuple_types() {
+        // Named tuple for function return
+        let divide_result = Type::NamedTuple(vec![
+            ("result".to_string(), Box::new(Type::Int)),
+            (
+                "error".to_string(),
+                Box::new(Type::Nullable(Box::new(Type::String))),
+            ),
+        ]);
+
+        // Same named tuple should match
+        let another_divide_result = Type::NamedTuple(vec![
+            ("result".to_string(), Box::new(Type::Int)),
+            (
+                "error".to_string(),
+                Box::new(Type::Nullable(Box::new(Type::String))),
+            ),
+        ]);
+        assert!(divide_result.is_assignable_to(&another_divide_result));
+
+        // Different field names should not match
+        let different_names = Type::NamedTuple(vec![
+            ("value".to_string(), Box::new(Type::Int)),
+            (
+                "message".to_string(),
+                Box::new(Type::Nullable(Box::new(Type::String))),
+            ),
+        ]);
+        assert!(divide_result.is_assignable_to(&different_names));
+
+        // Different field order should not match
+        let different_order = Type::NamedTuple(vec![
+            (
+                "error".to_string(),
+                Box::new(Type::Nullable(Box::new(Type::String))),
+            ),
+            ("result".to_string(), Box::new(Type::Int)),
+        ]);
+        assert!(!divide_result.is_assignable_to(&different_order));
+    }
+
+    #[test]
+    fn test_function_types() {
+        // Simple function: (Int, Int) -> Int
+        let add_function = Type::Function {
+            params: vec![Box::new(Type::Int), Box::new(Type::Int)],
+            return_types: vec![Box::new(Type::Int)],
+        };
+
+        // Same function signature should match
+        let another_add_function = Type::Function {
+            params: vec![Box::new(Type::Int), Box::new(Type::Int)],
+            return_types: vec![Box::new(Type::Int)],
+        };
+        assert!(add_function.is_assignable_to(&another_add_function));
+
+        // Different parameter types should not match
+        let float_add_function = Type::Function {
+            params: vec![Box::new(Type::Float), Box::new(Type::Float)],
+            return_types: vec![Box::new(Type::Float)],
+        };
+        assert!(!add_function.is_assignable_to(&float_add_function));
+
+        // Different return types should not match
+        let string_function = Type::Function {
+            params: vec![Box::new(Type::Int), Box::new(Type::Int)],
+            return_types: vec![Box::new(Type::String)],
+        };
+        assert!(!add_function.is_assignable_to(&string_function));
+
+        // Multiple return values
+        let multi_return_function = Type::Function {
+            params: vec![Box::new(Type::Int)],
+            return_types: vec![Box::new(Type::Int), Box::new(Type::String)],
+        };
+
+        // Different number of return values should not match
+        assert!(!add_function.is_assignable_to(&multi_return_function));
+    }
+
+    #[test]
+    fn test_nullable_complex_types() {
+        // Nullable tuple
+        let nullable_tuple = Type::Nullable(Box::new(Type::Tuple(vec![
+            Box::new(Type::Int),
+            Box::new(Type::String),
+        ])));
+
+        // Regular tuple can be assigned to nullable tuple
+        let regular_tuple = Type::Tuple(vec![Box::new(Type::Int), Box::new(Type::String)]);
+        assert!(regular_tuple.is_assignable_to(&nullable_tuple));
+
+        // nil can be assigned to nullable tuple
+        assert!(Type::Nil.is_assignable_to(&nullable_tuple));
+
+        // Nullable function
+        let nullable_function = Type::Nullable(Box::new(Type::Function {
+            params: vec![Box::new(Type::Int)],
+            return_types: vec![Box::new(Type::String)],
+        }));
+
+        let regular_function = Type::Function {
+            params: vec![Box::new(Type::Int)],
+            return_types: vec![Box::new(Type::String)],
+        };
+        assert!(regular_function.is_assignable_to(&nullable_function));
+        assert!(Type::Nil.is_assignable_to(&nullable_function));
+
+        // Nullable named tuple
+        let nullable_named_tuple = Type::Nullable(Box::new(Type::NamedTuple(vec![(
+            "result".to_string(),
+            Box::new(Type::Int),
+        )])));
+
+        let regular_named_tuple =
+            Type::NamedTuple(vec![("result".to_string(), Box::new(Type::Int))]);
+        assert!(regular_named_tuple.is_assignable_to(&nullable_named_tuple));
+        assert!(Type::Nil.is_assignable_to(&nullable_named_tuple));
+    }
+
+    #[test]
+    fn test_tuple_named_tuple_interchangeability() {
+        // Plain tuple and named tuple with same structure should be interchangeable
+        let plain_tuple = Type::Tuple(vec![
+            Box::new(Type::Int),
+            Box::new(Type::String),
+            Box::new(Type::Bool),
+        ]);
+
+        let named_tuple = Type::NamedTuple(vec![
+            ("first".to_string(), Box::new(Type::Int)),
+            ("second".to_string(), Box::new(Type::String)),
+            ("third".to_string(), Box::new(Type::Bool)),
+        ]);
+
+        // Both directions should work
+        assert!(plain_tuple.is_assignable_to(&named_tuple));
+        assert!(named_tuple.is_assignable_to(&plain_tuple));
+
+        // Different lengths should not be assignable
+        let shorter_plain = Type::Tuple(vec![Box::new(Type::Int), Box::new(Type::String)]);
+        assert!(!plain_tuple.is_assignable_to(&shorter_plain));
+        assert!(!named_tuple.is_assignable_to(&shorter_plain));
+
+        // Different types in same position should not be assignable
+        let different_types = Type::NamedTuple(vec![
+            ("first".to_string(), Box::new(Type::Float)), // Int -> Float
+            ("second".to_string(), Box::new(Type::String)),
+            ("third".to_string(), Box::new(Type::Bool)),
+        ]);
+        assert!(!named_tuple.is_assignable_to(&different_types));
+        assert!(!plain_tuple.is_assignable_to(&different_types));
+    }
+
+    #[test]
+    fn test_tuple_assignability_with_nullable() {
+        // Tuple with non-nullable element
+        let plain_tuple = Type::Tuple(vec![Box::new(Type::Int), Box::new(Type::String)]);
+
+        // Tuple with nullable element
+        let nullable_tuple = Type::Tuple(vec![
+            Box::new(Type::Int),
+            Box::new(Type::Nullable(Box::new(Type::String))),
+        ]);
+
+        // Non-nullable tuple should be assignable to nullable tuple
+        assert!(plain_tuple.is_assignable_to(&nullable_tuple));
+
+        // Nullable tuple should NOT be assignable to non-nullable tuple
+        assert!(!nullable_tuple.is_assignable_to(&plain_tuple));
+
+        // Same test with named tuples
+        let plain_named = Type::NamedTuple(vec![
+            ("id".to_string(), Box::new(Type::Int)),
+            ("name".to_string(), Box::new(Type::String)),
+        ]);
+
+        let nullable_named = Type::NamedTuple(vec![
+            ("id".to_string(), Box::new(Type::Int)),
+            (
+                "name".to_string(),
+                Box::new(Type::Nullable(Box::new(Type::String))),
+            ),
+        ]);
+
+        assert!(plain_named.is_assignable_to(&nullable_named));
+        assert!(!nullable_named.is_assignable_to(&plain_named));
+    }
+
+    #[test]
+    fn test_function_assignability_exact_match() {
+        // Simple function: (Int, String) -> Bool
+        let func1 = Type::Function {
+            params: vec![Box::new(Type::Int), Box::new(Type::String)],
+            return_types: vec![Box::new(Type::Bool)],
+        };
+
+        // Exact same signature
+        let func2 = Type::Function {
+            params: vec![Box::new(Type::Int), Box::new(Type::String)],
+            return_types: vec![Box::new(Type::Bool)],
+        };
+
+        // Should be assignable to each other
+        assert!(func1.is_assignable_to(&func2));
+        assert!(func2.is_assignable_to(&func1));
+    }
+
+    #[test]
+    fn test_function_assignability_parameter_mismatch() {
+        let base_func = Type::Function {
+            params: vec![Box::new(Type::Int), Box::new(Type::String)],
+            return_types: vec![Box::new(Type::Bool)],
+        };
+
+        // Different parameter count
+        let fewer_params = Type::Function {
+            params: vec![Box::new(Type::Int)],
+            return_types: vec![Box::new(Type::Bool)],
+        };
+        assert!(!base_func.is_assignable_to(&fewer_params));
+        assert!(!fewer_params.is_assignable_to(&base_func));
+
+        // Different parameter types
+        let different_param_types = Type::Function {
+            params: vec![Box::new(Type::Float), Box::new(Type::String)], // Int -> Float
+            return_types: vec![Box::new(Type::Bool)],
+        };
+        assert!(!base_func.is_assignable_to(&different_param_types));
+        assert!(!different_param_types.is_assignable_to(&base_func));
+
+        // Different parameter order
+        let swapped_params = Type::Function {
+            params: vec![Box::new(Type::String), Box::new(Type::Int)], // Swapped order
+            return_types: vec![Box::new(Type::Bool)],
+        };
+        assert!(!base_func.is_assignable_to(&swapped_params));
+        assert!(!swapped_params.is_assignable_to(&base_func));
+    }
+
+    #[test]
+    fn test_function_assignability_return_type_mismatch() {
+        let base_func = Type::Function {
+            params: vec![Box::new(Type::Int)],
+            return_types: vec![Box::new(Type::String)],
+        };
+
+        // Different return type
+        let different_return = Type::Function {
+            params: vec![Box::new(Type::Int)],
+            return_types: vec![Box::new(Type::Bool)], // String -> Bool
+        };
+        assert!(!base_func.is_assignable_to(&different_return));
+        assert!(!different_return.is_assignable_to(&base_func));
+
+        // Different number of return values
+        let multiple_returns = Type::Function {
+            params: vec![Box::new(Type::Int)],
+            return_types: vec![Box::new(Type::String), Box::new(Type::Bool)],
+        };
+        assert!(!base_func.is_assignable_to(&multiple_returns));
+        assert!(!multiple_returns.is_assignable_to(&base_func));
+
+        // Void function vs non-void
+        let void_func = Type::Function {
+            params: vec![Box::new(Type::Int)],
+            return_types: vec![],
+        };
+        assert!(!base_func.is_assignable_to(&void_func));
+        assert!(!void_func.is_assignable_to(&base_func));
+    }
+
+    #[test]
+    fn test_function_assignability_with_tuples() {
+        // Function returning plain tuple
+        let plain_tuple_func = Type::Function {
+            params: vec![],
+            return_types: vec![Box::new(Type::Tuple(vec![
+                Box::new(Type::Int),
+                Box::new(Type::String),
+            ]))],
+        };
+
+        // Function returning named tuple with same structure
+        let named_tuple_func = Type::Function {
+            params: vec![],
+            return_types: vec![Box::new(Type::NamedTuple(vec![
+                ("result".to_string(), Box::new(Type::Int)),
+                ("message".to_string(), Box::new(Type::String)),
+            ]))],
+        };
+
+        // Should be assignable due to tuple/named tuple interchangeability
+        assert!(plain_tuple_func.is_assignable_to(&named_tuple_func));
+        assert!(named_tuple_func.is_assignable_to(&plain_tuple_func));
+    }
+
+    #[test]
+    fn test_function_assignability_multiple_return_values() {
+        // Function with multiple return values
+        let multi_return = Type::Function {
+            params: vec![Box::new(Type::Int), Box::new(Type::Int)],
+            return_types: vec![
+                Box::new(Type::Int),
+                Box::new(Type::String),
+                Box::new(Type::Bool),
+            ],
+        };
+
+        // Same signature
+        let same_multi_return = Type::Function {
+            params: vec![Box::new(Type::Int), Box::new(Type::Int)],
+            return_types: vec![
+                Box::new(Type::Int),
+                Box::new(Type::String),
+                Box::new(Type::Bool),
+            ],
+        };
+
+        assert!(multi_return.is_assignable_to(&same_multi_return));
+
+        // Different order of return types
+        let different_order_returns = Type::Function {
+            params: vec![Box::new(Type::Int), Box::new(Type::Int)],
+            return_types: vec![
+                Box::new(Type::String),
+                Box::new(Type::Int),
+                Box::new(Type::Bool),
+            ],
+        };
+        assert!(!multi_return.is_assignable_to(&different_order_returns));
+    }
+
+    #[test]
+    fn test_function_assignability_with_nullable_parameters() {
+        // Function with non-nullable parameter
+        let non_nullable_param = Type::Function {
+            params: vec![Box::new(Type::String)],
+            return_types: vec![Box::new(Type::Int)],
+        };
+
+        // Function with nullable parameter
+        let nullable_param = Type::Function {
+            params: vec![Box::new(Type::Nullable(Box::new(Type::String)))],
+            return_types: vec![Box::new(Type::Int)],
+        };
+
+        // These should NOT be assignable
+        assert!(!nullable_param.is_assignable_to(&non_nullable_param));
+    }
+
+    #[test]
+    fn test_function_assignability_with_nullable_returns() {
+        // Function with non-nullable return
+        let non_nullable_return = Type::Function {
+            params: vec![Box::new(Type::Int)],
+            return_types: vec![Box::new(Type::String)],
+        };
+
+        // Function with nullable return
+        let nullable_return = Type::Function {
+            params: vec![Box::new(Type::Int)],
+            return_types: vec![Box::new(Type::Nullable(Box::new(Type::String)))],
+        };
+
+        // These should NOT be assignable - return types must match exactly
+        assert!(!non_nullable_return.is_assignable_to(&nullable_return));
+        assert!(!nullable_return.is_assignable_to(&non_nullable_return));
+    }
+
+    #[test]
+    fn test_void_functions() {
+        // Void function (no return values)
+        let void_func = Type::Function {
+            params: vec![Box::new(Type::String)],
+            return_types: vec![],
+        };
+
+        // Another void function with same parameters
+        let another_void_func = Type::Function {
+            params: vec![Box::new(Type::String)],
+            return_types: vec![],
+        };
+
+        // Should be assignable
+        assert!(void_func.is_assignable_to(&another_void_func));
+
+        // Void function with different parameters
+        let different_void_func = Type::Function {
+            params: vec![Box::new(Type::Int)],
+            return_types: vec![],
+        };
+
+        assert!(!void_func.is_assignable_to(&different_void_func));
+    }
+
+    #[test]
+    fn test_complex_nested_function_types() {
+        // Function that takes a function as parameter
+        let higher_order_func = Type::Function {
+            params: vec![Box::new(Type::Function {
+                params: vec![Box::new(Type::Int)],
+                return_types: vec![Box::new(Type::String)],
+            })],
+            return_types: vec![Box::new(Type::Bool)],
+        };
+
+        // Same higher-order function
+        let same_higher_order = Type::Function {
+            params: vec![Box::new(Type::Function {
+                params: vec![Box::new(Type::Int)],
+                return_types: vec![Box::new(Type::String)],
+            })],
+            return_types: vec![Box::new(Type::Bool)],
+        };
+
+        assert!(higher_order_func.is_assignable_to(&same_higher_order));
+
+        // Different inner function signature
+        let different_inner = Type::Function {
+            params: vec![Box::new(Type::Function {
+                params: vec![Box::new(Type::Float)], // Int -> Float
+                return_types: vec![Box::new(Type::String)],
+            })],
+            return_types: vec![Box::new(Type::Bool)],
+        };
+
+        assert!(!higher_order_func.is_assignable_to(&different_inner));
+    }
+
+    // Helper to reset registry for each test
+    fn setup_registry() {
+        let mut registry = CLASS_REGISTRY.write().unwrap();
+        registry.clear();
+
+        registry.insert(
+            "Animal".to_string(),
+            ClassInfo {
+                name: "Animal".to_string(),
+                superclass: None,
+            },
+        );
+        registry.insert(
+            "Dog".to_string(),
+            ClassInfo {
+                name: "Dog".to_string(),
+                superclass: Some("Animal".to_string()),
+            },
+        );
+        registry.insert(
+            "Cat".to_string(),
+            ClassInfo {
+                name: "Cat".to_string(),
+                superclass: Some("Animal".to_string()),
+            },
+        );
+        registry.insert(
+            "Poodle".to_string(),
+            ClassInfo {
+                name: "Poodle".to_string(),
+                superclass: Some("Dog".to_string()),
+            },
+        );
+    }
+
+    #[test]
+    fn test_class_exact_match() {
+        setup_registry();
+        let a = Type::Class("Dog".to_string());
+        let b = Type::Class("Dog".to_string());
+
+        assert!(a.is_assignable_to(&b));
+    }
+
+    #[test]
+    fn test_class_subtype() {
+        setup_registry();
+        let poodle = Type::Class("Poodle".to_string());
+        let dog = Type::Class("Dog".to_string());
+        let animal = Type::Class("Animal".to_string());
+
+        assert!(poodle.is_assignable_to(&dog));
+        assert!(poodle.is_assignable_to(&animal));
+    }
+
+    #[test]
+    fn test_class_supertype_not_assignable_to_subtype() {
+        setup_registry();
+        let dog = Type::Class("Dog".to_string());
+        let poodle = Type::Class("Poodle".to_string());
+
+        assert!(!dog.is_assignable_to(&poodle));
+    }
+
+    #[test]
+    fn test_class_unregistered() {
+        setup_registry();
+        let unknown = Type::Class("Dragon".to_string());
+        let animal = Type::Class("Animal".to_string());
+
+        // Unregistered class should not be assignable to anything
+        assert!(!unknown.is_assignable_to(&animal));
+    }
+}
