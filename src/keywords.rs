@@ -10,7 +10,11 @@ pub enum Keyword {
     Nil,
     While,
     For,
-    Fun,
+    Function,
+    This,
+    Super,
+    True,
+    False,
 }
 
 impl TryFrom<&str> for Keyword {
@@ -28,7 +32,11 @@ impl TryFrom<&str> for Keyword {
             "nil" => Ok(Keyword::Nil),
             "while" => Ok(Keyword::While),
             "for" => Ok(Keyword::For),
-            "fun" => Ok(Keyword::Fun),
+            "fn" => Ok(Keyword::Function),
+            "this" => Ok(Keyword::This),
+            "super" => Ok(Keyword::Super),
+            "true" => Ok(Keyword::True),
+            "false" => Ok(Keyword::False),
             _ => Err(format!("{value} is not a keyword")),
         }
     }

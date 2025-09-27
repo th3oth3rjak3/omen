@@ -1,0 +1,61 @@
+// this is the only supported comment
+// multiple lines are fine.
+
+// we allow top level code to execute like this:
+let a: Int = 1;
+let b: Int = a + 2;
+
+// functions are first class
+fn add(a: Int, b: Int) -> Int {
+    return a + b;
+}
+
+let addResult = add(a, b); // expect 4
+
+// declare a class
+class Point {
+    this.x: Int;
+    this.y: Int;
+    this.z: Int?;
+
+    // new is the constructor and is a special method that
+    // returns an instance of the class. It doesn't have to have a
+    // return type specified since it's the constructor and it's implied.
+    // All fields must be assigned in the constructor initially.
+    // There are no default values allowed. I think default values are a trap.
+    new(x: Int, y: Int) {
+        this.x = x;
+        this.y = y;
+        this.z = nil; // This is required because we like explicit.
+    }
+}
+
+// usage
+let point1 = Point(1, 2); // this calls the new method under the hood and passes the values.
+let point2 = Point(5, 2);
+
+// inheritance example
+class Animal {
+    this.speakSound: String;
+
+    fn new(speakSound: String) {
+        this.speakSound = speakSound;
+    }
+
+    fn speak(this) {
+        print(this.speakSound);
+    }
+}
+
+// Dog inherits from Animal
+class Dog : Animal {
+    this.name: String;
+
+    fn new(name: String) {
+        this.name = name;
+        super.speakSound = "woof!";
+    }
+}
+
+let myDog = Dog("Penny");
+myDog.speak();

@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+import os
+
+SRC_DIR = "src"
+OUTPUT_FILE = "merged.rs"
+
+def collect_rs_files(src_dir):
+    rs_files = []
+    for root, _, files in os.walk(src_dir):
+        for f in files:
+            if f.endswith(".rs"):
+                rs_files.append(os.path.join(root, f))
+    return sorted(rs_files)  # sorted for consistent order
+
+def merge_files(files, output_file):
+    with open(output_file, "w", encoding="utf-8") as out:
+        for path in files:
+            out.write(f"// ===== File: {path} =====\n\n")
+            with open(path, "r", encoding="utf-8") as f:
+                out.write(f.read())
+            out.write(f"\n\n// ===== End of {path} =====\n\n")
+    print(f"✅ Merged {len(files)} Rust files into {output_file}")
+
+if __name__ == "__main__":
+    rs_files = collect_rs_files(SRC_DIR)
+    if not rs_files:
+        print("⚠️ No .rs files found in src/")
+    else:
+        merge_files(rs_files, OUTPUT_FILE)

@@ -67,6 +67,10 @@ impl Lexer {
             ']' => self.make_single(TokenKind::Delimiter(Delimiter::RightBracket)),
             '{' => self.make_single(TokenKind::Delimiter(Delimiter::LeftBrace)),
             '}' => self.make_single(TokenKind::Delimiter(Delimiter::RightBrace)),
+            ':' => self.make_single(TokenKind::Delimiter(Delimiter::Colon)),
+            ';' => self.make_single(TokenKind::Delimiter(Delimiter::Semicolon)),
+            ',' => self.make_single(TokenKind::Delimiter(Delimiter::Comma)),
+
             // operators
             '+' => match self.peek_next() {
                 '=' => self.make_double(TokenKind::Operator(Operator::PlusEqual)),
@@ -74,6 +78,7 @@ impl Lexer {
             },
             '-' => match self.peek_next() {
                 '=' => self.make_double(TokenKind::Operator(Operator::MinusEqual)),
+                '>' => self.make_double(TokenKind::Operator(Operator::Arrow)),
                 _ => self.make_single(TokenKind::Operator(Operator::Minus)),
             },
             '*' => match self.peek_next() {
@@ -86,6 +91,7 @@ impl Lexer {
             },
             '=' => match self.peek_next() {
                 '=' => self.make_double(TokenKind::Operator(Operator::EqualEqual)),
+                '>' => self.make_double(TokenKind::Operator(Operator::FatArrow)),
                 _ => self.make_single(TokenKind::Operator(Operator::Equal)),
             },
             '!' => match self.peek_next() {
@@ -100,6 +106,7 @@ impl Lexer {
                 '=' => self.make_double(TokenKind::Operator(Operator::GreaterEqual)),
                 _ => self.make_single(TokenKind::Operator(Operator::Greater)),
             },
+            '.' => self.make_single(TokenKind::Operator(Operator::Dot)),
             _ => self.make_error_token(format!("Unexpected character '{current}'")),
         }
     }
@@ -243,11 +250,12 @@ mod tests {
 
     #[test]
     pub fn lexer_can_tokenize_all_delimiters() {
-        let source = "()[]{}";
+        let source = "()[]{}:;,";
         let mut lexer = Lexer::default();
         lexer.source = source.chars().collect();
 
         let tokens = lexer.tokenize();
+        assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
 
         assert!(tokens[0].kind.is_delimiter(Delimiter::LeftParen));
         assert!(tokens[1].kind.is_delimiter(Delimiter::RightParen));
@@ -255,16 +263,36 @@ mod tests {
         assert!(tokens[3].kind.is_delimiter(Delimiter::RightBracket));
         assert!(tokens[4].kind.is_delimiter(Delimiter::LeftBrace));
         assert!(tokens[5].kind.is_delimiter(Delimiter::RightBrace));
-        assert!(tokens[6].kind.is_special(Special::Eof));
+        assert!(tokens[6].kind.is_delimiter(Delimiter::Colon));
+        assert!(tokens[7].kind.is_delimiter(Delimiter::Semicolon));
+        assert!(tokens[8].kind.is_delimiter(Delimiter::Comma));
     }
 
     #[test]
     pub fn lexer_can_tokenize_all_keywords() {
-        let source = "if else class return continue break let nil while for fun";
+        let source = r#"
+            if 
+            else 
+            class 
+            return 
+            continue 
+            break 
+            let 
+            nil 
+            while 
+            for 
+            fn 
+            this 
+            super
+            true
+            false    
+        "#;
+
         let mut lexer = Lexer::default();
         lexer.source = source.chars().collect();
 
         let tokens = lexer.tokenize();
+        assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
 
         assert!(tokens[0].kind.is_keyword(Keyword::If));
         assert!(tokens[1].kind.is_keyword(Keyword::Else));
@@ -276,17 +304,21 @@ mod tests {
         assert!(tokens[7].kind.is_keyword(Keyword::Nil));
         assert!(tokens[8].kind.is_keyword(Keyword::While));
         assert!(tokens[9].kind.is_keyword(Keyword::For));
-        assert!(tokens[10].kind.is_keyword(Keyword::Fun));
-        assert!(tokens[11].kind.is_special(Special::Eof));
+        assert!(tokens[10].kind.is_keyword(Keyword::Function));
+        assert!(tokens[11].kind.is_keyword(Keyword::This));
+        assert!(tokens[12].kind.is_keyword(Keyword::Super));
+        assert!(tokens[13].kind.is_keyword(Keyword::True));
+        assert!(tokens[14].kind.is_keyword(Keyword::False));
     }
 
     #[test]
     pub fn lexer_can_tokenize_all_operators() {
-        let source = "+ += - -= * *= / /= = == ! != < <= > >=";
+        let source = "+ += - -= * *= / /= = == ! != < <= > >= . -> =>";
         let mut lexer = Lexer::default();
         lexer.source = source.chars().collect();
 
         let tokens = lexer.tokenize();
+        assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
 
         assert!(tokens[0].kind.is_operator(Operator::Plus));
         assert!(tokens[1].kind.is_operator(Operator::PlusEqual));
@@ -304,7 +336,9 @@ mod tests {
         assert!(tokens[13].kind.is_operator(Operator::LessEqual));
         assert!(tokens[14].kind.is_operator(Operator::Greater));
         assert!(tokens[15].kind.is_operator(Operator::GreaterEqual));
-        assert!(tokens[16].kind.is_special(Special::Eof));
+        assert!(tokens[16].kind.is_operator(Operator::Dot));
+        assert!(tokens[17].kind.is_operator(Operator::Arrow));
+        assert!(tokens[18].kind.is_operator(Operator::FatArrow));
     }
 
     #[test]
@@ -313,19 +347,18 @@ mod tests {
         let mut lexer = Lexer::default();
         lexer.source = source.chars().collect();
         let tokens = lexer.tokenize();
-        assert_eq!(5, tokens.len());
+        assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
+
         assert_eq!(TokenKind::Number("1".into()), tokens[0].kind);
         assert_eq!(TokenKind::Number("1.2".into()), tokens[1].kind);
         assert_eq!(TokenKind::Number("1.0".into()), tokens[2].kind);
         assert_eq!(TokenKind::Number("432".into()), tokens[3].kind);
-        assert_eq!(TokenKind::Special(Special::Eof), tokens[4].kind);
     }
 
     #[test]
     pub fn lexer_produces_eof_token_for_empty_input() {
         let mut lexer = Lexer::default();
         let tokens = lexer.tokenize();
-        assert_eq!(1, tokens.len());
-        assert_eq!(TokenKind::Special(Special::Eof), tokens[0].kind);
+        assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
     }
 }

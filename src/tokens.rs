@@ -58,6 +58,9 @@ pub enum Operator {
     LessEqual,
     Greater,
     GreaterEqual,
+    Dot,
+    Arrow,
+    FatArrow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +71,9 @@ pub enum Delimiter {
     RightBrace,
     LeftBracket,
     RightBracket,
+    Colon,
+    Semicolon,
+    Comma,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

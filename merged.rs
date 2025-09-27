@@ -1,3 +1,954 @@
+// ===== File: src/ast.rs =====
+
+use crate::types::Type;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Program {
+    pub items: Vec<Item>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Item {
+    Function(FunctionDecl),
+    Class(ClassDecl),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionDecl {
+    pub name: String,
+    pub params: Vec<Parameter>,
+    pub return_type: Option<Type>,
+    pub body: Block,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Parameter {
+    pub name: String,
+    pub param_type: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassDecl {
+    pub name: String,
+    pub body: Vec<ClassItem>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClassItem {
+    Field { name: String, field_type: String },
+    Method(FunctionDecl),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Block {
+    pub statements: Vec<Statement>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Statement {
+    Expression(Expression),
+    Return(Option<Expression>),
+    Let {
+        name: String,
+        type_annotation: Option<String>,
+        initializer: Option<Expression>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expression {
+    Number(String),
+    Identifier(String),
+    Nil,
+}
+
+
+// ===== End of src/ast.rs =====
+
+// ===== File: src/error_handling.rs =====
+
+#[derive(Debug, Clone, Copy)]
+pub struct Position {
+    pub line: usize,
+    pub column: usize,
+    pub offset: usize,
+}
+
+impl Default for Position {
+    fn default() -> Self {
+        Self {
+            line: 1,
+            column: 0,
+            offset: 0,
+        }
+    }
+}
+
+impl Position {
+    pub fn new(line: usize, column: usize, offset: usize) -> Self {
+        Self {
+            line,
+            column,
+            offset,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Span {
+    pub start: Position,
+    pub end: Option<Position>,
+}
+
+impl Default for Span {
+    fn default() -> Self {
+        Self {
+            start: Default::default(),
+            end: None,
+        }
+    }
+}
+
+impl Span {
+    pub fn new(start: Position, end: Option<Position>) -> Self {
+        Self { start, end }
+    }
+}
+
+
+// ===== End of src/error_handling.rs =====
+
+// ===== File: src/heap.rs =====
+
+use std::{cell::RefCell, rc::Rc};
+
+use crate::object::{HeapObject, Object};
+
+/// Heap is the memory heap for allocating and deallocating memory
+/// that is tracked by the runtime.
+#[derive(Debug, Clone)]
+pub struct Heap {
+    /// An intrusive linked list tracks all of the
+    /// allocated objects on the heap.
+    objects: Option<Rc<RefCell<HeapObject>>>,
+    /// The number of bytes allocated since the last GC.
+    allocated_bytes_since_last_gc: usize,
+    /// The number of bytes, that when exceeded, triggers a garbage collection cycle.
+    gc_threshold_bytes: usize,
+}
+
+impl Heap {
+    /// Create a new heap.
+    ///
+    /// # Parameters
+    /// * `initial_threshold` - The size in bytes until the first GC.
+    pub fn new(initial_threshold: usize) -> Self {
+        Self {
+            objects: None,
+            allocated_bytes_since_last_gc: 0,
+            gc_threshold_bytes: initial_threshold,
+        }
+    }
+
+    /// Create a new heap-managed allocation.
+    ///
+    /// # Params:
+    /// * `object` - The object to place on the heap.
+    ///
+    /// # Returns:
+    /// * The allocated object, now tracked by the heap.
+    pub fn allocate(&mut self, object: Object) -> Rc<RefCell<HeapObject>> {
+        let heap_obj = HeapObject::new(object, self.objects.take());
+        let new_alloc = Rc::new(RefCell::new(heap_obj));
+        self.objects = Some(new_alloc.clone());
+
+        self.allocated_bytes_since_last_gc += new_alloc.borrow().size();
+
+        new_alloc
+    }
+
+    /// Determine if garbage collection is needed.
+    ///
+    /// # Returns:
+    /// * True when the allocations have exceeded the threshold, otherwise false.
+    pub fn needs_collection(&self) -> bool {
+        self.allocated_bytes_since_last_gc >= self.gc_threshold_bytes
+    }
+
+    /// Lets the heap know that now is a safe time to run a garbage collection.
+    ///
+    /// # Parameters
+    /// * `roots` - A slice of `Rc<RefCell<HeapObject>>` representing all currently
+    ///   reachable objects from the VM (e.g., stack values, globals, and other
+    ///   root references). The GC will start marking from these objects to
+    ///   determine which objects are still alive.
+    pub fn collect_garbage(&mut self, roots: &[Rc<RefCell<HeapObject>>]) {
+        self.mark(roots);
+        self.sweep();
+    }
+
+    /// Mark all of the objects that are reachable from the provided roots
+    /// to prepare for a garbage collection. Any marked items are spared from collection.
+    ///
+    /// # Params
+    /// * `roots` - A slice of `Rc<RefCell<HeapObject>>` representing all currently
+    ///   reachable objects from the VM (e.g., stack values, globals, and other
+    ///   root references). The GC will start marking from these objects to
+    ///   determine which objects are still alive.
+    fn mark(&mut self, roots: &[Rc<RefCell<HeapObject>>]) {
+        let mut gray_stack: Vec<Rc<RefCell<HeapObject>>> = roots.to_vec();
+
+        while let Some(obj_rc) = gray_stack.pop() {
+            let mut obj = obj_rc.borrow_mut();
+            if obj.marked {
+                continue;
+            }
+
+            obj.marked = true;
+
+            // add child references to gray stack
+            for child in obj.children() {
+                gray_stack.push(child.clone());
+            }
+        }
+    }
+
+    /// Remove all unmarked objects from the list and relink the list.
+    /// When unmarked objects are removed from the list, if no other references
+    /// exist to that object, the object will be freed.
+    pub fn sweep(&mut self) {
+        let mut new_head: Option<Rc<RefCell<HeapObject>>> = None;
+        let mut last: Option<Rc<RefCell<HeapObject>>> = None;
+
+        let mut current = self.objects.take();
+        let mut reclaimed_bytes = 0;
+
+        while let Some(obj_rc) = current {
+            let mut obj = obj_rc.borrow_mut();
+            let next = obj.next.take();
+
+            if obj.marked {
+                obj.marked = false;
+
+                if let Some(last_rc) = &last {
+                    last_rc.borrow_mut().next = Some(obj_rc.clone());
+                } else {
+                    new_head = Some(obj_rc.clone());
+                }
+
+                last = Some(obj_rc.clone());
+            } else {
+                // If the object isn't marked, we let it drop.
+                reclaimed_bytes += obj.size();
+            }
+
+            current = next;
+        }
+
+        self.objects = new_head;
+
+        // Reset allocation counter
+        let allocated_since_last_gc = self.allocated_bytes_since_last_gc;
+        self.allocated_bytes_since_last_gc = 0;
+
+        // Adaptive threshold: increase if little reclaimed, decrease if lots freed
+        let freed_fraction = reclaimed_bytes as f64 / (allocated_since_last_gc.max(1) as f64);
+        if freed_fraction < 0.1 {
+            self.gc_threshold_bytes = (self.gc_threshold_bytes as f64 * 1.5) as usize;
+        } else {
+            // Avoid shrinking too much
+            const MIN_THRESHOLD: usize = 1024;
+            self.gc_threshold_bytes = std::cmp::max(
+                MIN_THRESHOLD,
+                (self.gc_threshold_bytes as f64 * 0.8) as usize,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unreferenced_objects_are_collected() {
+        let mut heap = Heap::new(1024);
+
+        // Allocate three objects, none of which are roots
+        heap.allocate(Object::String("one".into()));
+        heap.allocate(Object::String("two".into()));
+        heap.allocate(Object::String("three".into()));
+
+        // Before GC, the heap has 3 objects
+        assert!(heap.objects.is_some());
+
+        // Run GC with no roots
+        heap.collect_garbage(&[]);
+
+        // After GC, the list should be empty
+        assert!(heap.objects.is_none());
+    }
+
+    #[test]
+    fn referenced_objects_are_preserved() {
+        let mut heap = Heap::new(1024);
+
+        // Allocate some objects
+        let obj1 = heap.allocate(Object::String("one".into()));
+        let _ = heap.allocate(Object::String("two".into()));
+
+        // Only obj1 is a root
+        let roots = vec![obj1.clone()];
+
+        // Run GC
+        heap.collect_garbage(&roots);
+
+        // obj1 should still be alive
+        assert!(heap.objects.is_some());
+        assert!(
+            heap.objects.as_ref().unwrap().borrow().marked == false
+                || heap.objects.as_ref().unwrap().borrow().object == Object::String("one".into())
+        );
+
+        // obj2 should be collected
+        // Note: since we don't have direct access to obj2, we just check count
+        // We could traverse the list and count elements if needed
+        let mut count = 0;
+        let mut current = heap.objects.clone();
+        while let Some(rc) = current {
+            count += 1;
+            current = rc.borrow().next.clone();
+        }
+        assert_eq!(count, 1);
+    }
+}
+
+
+// ===== End of src/heap.rs =====
+
+// ===== File: src/keywords.rs =====
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keyword {
+    If,
+    Else,
+    Class,
+    Return,
+    Continue,
+    Break,
+    Let,
+    Nil,
+    While,
+    For,
+    Fun,
+    This,
+    Super,
+}
+
+impl TryFrom<&str> for Keyword {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "if" => Ok(Keyword::If),
+            "else" => Ok(Keyword::Else),
+            "class" => Ok(Keyword::Class),
+            "return" => Ok(Keyword::Return),
+            "continue" => Ok(Keyword::Continue),
+            "break" => Ok(Keyword::Break),
+            "let" => Ok(Keyword::Let),
+            "nil" => Ok(Keyword::Nil),
+            "while" => Ok(Keyword::While),
+            "for" => Ok(Keyword::For),
+            "fun" => Ok(Keyword::Fun),
+            "this" => Ok(Keyword::This),
+            "super" => Ok(Keyword::Super),
+            _ => Err(format!("{value} is not a keyword")),
+        }
+    }
+}
+
+
+// ===== End of src/keywords.rs =====
+
+// ===== File: src/lexer.rs =====
+
+use crate::{
+    error_handling::{Position, Span},
+    keywords::Keyword,
+    tokens::{Delimiter, Operator, Special, Token, TokenKind},
+};
+
+#[derive(Debug, Clone)]
+pub struct Lexer {
+    pub source: Vec<char>,
+    pub line: usize,
+    pub column: usize,
+    pub offset: usize,
+    pub line_offset: usize,
+}
+
+impl Default for Lexer {
+    fn default() -> Self {
+        Self {
+            source: Vec::new(),
+            line: 1,
+            column: 0,
+            offset: 0,
+            line_offset: 0,
+        }
+    }
+}
+
+impl Lexer {
+    pub fn tokenize(&mut self) -> Vec<Token> {
+        let mut tokens = Vec::new();
+
+        loop {
+            let tok = self.next_token();
+            let kind = tok.kind.clone();
+            tokens.push(tok);
+
+            if kind.is_special(Special::Eof) {
+                return tokens;
+            }
+        }
+    }
+
+    fn next_token(&mut self) -> Token {
+        self.skip_whitespace_and_comments();
+
+        let current = self.peek();
+        if current == '\0' {
+            return Token::new(
+                TokenKind::Special(Special::Eof),
+                Span::new(self.position(), None),
+            );
+        }
+
+        if current.is_ascii_alphabetic() || current == '_' {
+            return self.handle_identifier();
+        }
+
+        if current.is_ascii_digit() {
+            return self.handle_numbers();
+        }
+
+        match current {
+            // delimiters
+            '(' => self.make_single(TokenKind::Delimiter(Delimiter::LeftParen)),
+            ')' => self.make_single(TokenKind::Delimiter(Delimiter::RightParen)),
+            '[' => self.make_single(TokenKind::Delimiter(Delimiter::LeftBracket)),
+            ']' => self.make_single(TokenKind::Delimiter(Delimiter::RightBracket)),
+            '{' => self.make_single(TokenKind::Delimiter(Delimiter::LeftBrace)),
+            '}' => self.make_single(TokenKind::Delimiter(Delimiter::RightBrace)),
+            ':' => self.make_single(TokenKind::Delimiter(Delimiter::Colon)),
+            ';' => self.make_single(TokenKind::Delimiter(Delimiter::Semicolon)),
+            ',' => self.make_single(TokenKind::Delimiter(Delimiter::Comma)),
+
+            // operators
+            '+' => match self.peek_next() {
+                '=' => self.make_double(TokenKind::Operator(Operator::PlusEqual)),
+                _ => self.make_single(TokenKind::Operator(Operator::Plus)),
+            },
+            '-' => match self.peek_next() {
+                '=' => self.make_double(TokenKind::Operator(Operator::MinusEqual)),
+                '>' => self.make_double(TokenKind::Operator(Operator::Arrow)),
+                _ => self.make_single(TokenKind::Operator(Operator::Minus)),
+            },
+            '*' => match self.peek_next() {
+                '=' => self.make_double(TokenKind::Operator(Operator::StarEqual)),
+                _ => self.make_single(TokenKind::Operator(Operator::Star)),
+            },
+            '/' => match self.peek_next() {
+                '=' => self.make_double(TokenKind::Operator(Operator::SlashEqual)),
+                _ => self.make_single(TokenKind::Operator(Operator::Slash)),
+            },
+            '=' => match self.peek_next() {
+                '=' => self.make_double(TokenKind::Operator(Operator::EqualEqual)),
+                '>' => self.make_double(TokenKind::Operator(Operator::FatArrow)),
+                _ => self.make_single(TokenKind::Operator(Operator::Equal)),
+            },
+            '!' => match self.peek_next() {
+                '=' => self.make_double(TokenKind::Operator(Operator::BangEqual)),
+                _ => self.make_single(TokenKind::Operator(Operator::Bang)),
+            },
+            '<' => match self.peek_next() {
+                '=' => self.make_double(TokenKind::Operator(Operator::LessEqual)),
+                _ => self.make_single(TokenKind::Operator(Operator::Less)),
+            },
+            '>' => match self.peek_next() {
+                '=' => self.make_double(TokenKind::Operator(Operator::GreaterEqual)),
+                _ => self.make_single(TokenKind::Operator(Operator::Greater)),
+            },
+            '.' => self.make_single(TokenKind::Operator(Operator::Dot)),
+            _ => self.make_error_token(format!("Unexpected character '{current}'")),
+        }
+    }
+
+    fn handle_identifier(&mut self) -> Token {
+        let start = self.position();
+        self.advance(); // skip the first char which is a valid alpha or _ char
+        while !self.is_at_end() && (self.peek().is_ascii_alphanumeric() || self.peek() == '_') {
+            self.advance();
+        }
+
+        let span = Span::new(start, Some(self.position()));
+
+        let literal = self.source[start.offset..self.offset]
+            .to_vec()
+            .iter()
+            .collect::<String>();
+
+        let kw = Keyword::try_from(literal.as_ref());
+        if let Ok(kw) = kw {
+            return Token::new(TokenKind::Keyword(kw), span);
+        }
+
+        Token::new(TokenKind::Identifier(literal), span)
+    }
+
+    fn handle_numbers(&mut self) -> Token {
+        let start = self.position();
+        self.advance(); // skip the first number that we already checked.
+        while !self.is_at_end() && self.peek().is_ascii_digit() {
+            self.advance();
+        }
+
+        if self.peek() == '.' && self.peek_next().is_ascii_digit() {
+            self.advance(); // skip over period
+            while !self.is_at_end() && self.peek().is_ascii_digit() {
+                self.advance();
+            }
+        }
+
+        let span = Span::new(start, Some(self.position()));
+        let literal: String = self.source[start.offset..self.offset].iter().collect();
+        Token::new(TokenKind::Number(literal), span)
+    }
+
+    fn position(&mut self) -> Position {
+        Position::new(self.line, self.column, self.offset)
+    }
+
+    fn is_at_end(&mut self) -> bool {
+        self.offset >= self.source.len()
+    }
+
+    fn advance(&mut self) {
+        match self.peek() {
+            '\n' => {
+                self.offset += 1;
+                self.line += 1;
+                self.column = 0;
+                self.line_offset = self.offset;
+            }
+            '\0' => return,
+            _ => {
+                self.offset += 1;
+                self.column += 1;
+            }
+        }
+    }
+
+    fn peek(&mut self) -> char {
+        self.peek_at(self.offset)
+    }
+
+    fn peek_next(&mut self) -> char {
+        self.peek_at(self.offset + 1)
+    }
+
+    fn peek_at(&mut self, offset: usize) -> char {
+        if offset >= self.source.len() {
+            return '\0';
+        }
+
+        return self.source[offset];
+    }
+
+    fn make_error_token(&mut self, err: String) -> Token {
+        let start = self.position();
+        self.advance();
+        let span = Span::new(start, None);
+        Token::new(TokenKind::Special(Special::Error(err)), span)
+    }
+
+    fn make_single(&mut self, kind: TokenKind) -> Token {
+        let start = self.position();
+        self.advance();
+        let end = Some(self.position());
+        let span = Span::new(start, end);
+        Token::new(kind, span)
+    }
+
+    fn make_double(&mut self, kind: TokenKind) -> Token {
+        let start = self.position();
+        self.advance();
+        self.advance();
+        let end = Some(self.position());
+        let span = Span::new(start, end);
+        Token::new(kind, span)
+    }
+
+    fn skip_whitespace(&mut self) {
+        loop {
+            match self.peek() {
+                '\r' | '\t' | '\n' | ' ' => self.advance(),
+                _ => return,
+            }
+        }
+    }
+
+    fn skip_comments(&mut self) {
+        while self.peek() != '\n' {
+            self.advance();
+        }
+    }
+
+    fn skip_whitespace_and_comments(&mut self) {
+        loop {
+            self.skip_whitespace();
+            match (self.peek(), self.peek_next()) {
+                ('/', '/') => self.skip_comments(),
+                _ => return,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{keywords::Keyword, tokens::Operator};
+
+    use super::*;
+
+    #[test]
+    pub fn lexer_can_tokenize_all_delimiters() {
+        let source = "()[]{}:;,";
+        let mut lexer = Lexer::default();
+        lexer.source = source.chars().collect();
+
+        let tokens = lexer.tokenize();
+        assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
+
+        assert!(tokens[0].kind.is_delimiter(Delimiter::LeftParen));
+        assert!(tokens[1].kind.is_delimiter(Delimiter::RightParen));
+        assert!(tokens[2].kind.is_delimiter(Delimiter::LeftBracket));
+        assert!(tokens[3].kind.is_delimiter(Delimiter::RightBracket));
+        assert!(tokens[4].kind.is_delimiter(Delimiter::LeftBrace));
+        assert!(tokens[5].kind.is_delimiter(Delimiter::RightBrace));
+        assert!(tokens[6].kind.is_delimiter(Delimiter::Colon));
+        assert!(tokens[7].kind.is_delimiter(Delimiter::Semicolon));
+        assert!(tokens[8].kind.is_delimiter(Delimiter::Comma));
+    }
+
+    #[test]
+    pub fn lexer_can_tokenize_all_keywords() {
+        let source = "if else class return continue break let nil while for fun this super";
+        let mut lexer = Lexer::default();
+        lexer.source = source.chars().collect();
+
+        let tokens = lexer.tokenize();
+        assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
+
+        assert!(tokens[0].kind.is_keyword(Keyword::If));
+        assert!(tokens[1].kind.is_keyword(Keyword::Else));
+        assert!(tokens[2].kind.is_keyword(Keyword::Class));
+        assert!(tokens[3].kind.is_keyword(Keyword::Return));
+        assert!(tokens[4].kind.is_keyword(Keyword::Continue));
+        assert!(tokens[5].kind.is_keyword(Keyword::Break));
+        assert!(tokens[6].kind.is_keyword(Keyword::Let));
+        assert!(tokens[7].kind.is_keyword(Keyword::Nil));
+        assert!(tokens[8].kind.is_keyword(Keyword::While));
+        assert!(tokens[9].kind.is_keyword(Keyword::For));
+        assert!(tokens[10].kind.is_keyword(Keyword::Fun));
+        assert!(tokens[11].kind.is_keyword(Keyword::This));
+        assert!(tokens[12].kind.is_keyword(Keyword::Super));
+    }
+
+    #[test]
+    pub fn lexer_can_tokenize_all_operators() {
+        let source = "+ += - -= * *= / /= = == ! != < <= > >= . -> =>";
+        let mut lexer = Lexer::default();
+        lexer.source = source.chars().collect();
+
+        let tokens = lexer.tokenize();
+        assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
+
+        assert!(tokens[0].kind.is_operator(Operator::Plus));
+        assert!(tokens[1].kind.is_operator(Operator::PlusEqual));
+        assert!(tokens[2].kind.is_operator(Operator::Minus));
+        assert!(tokens[3].kind.is_operator(Operator::MinusEqual));
+        assert!(tokens[4].kind.is_operator(Operator::Star));
+        assert!(tokens[5].kind.is_operator(Operator::StarEqual));
+        assert!(tokens[6].kind.is_operator(Operator::Slash));
+        assert!(tokens[7].kind.is_operator(Operator::SlashEqual));
+        assert!(tokens[8].kind.is_operator(Operator::Equal));
+        assert!(tokens[9].kind.is_operator(Operator::EqualEqual));
+        assert!(tokens[10].kind.is_operator(Operator::Bang));
+        assert!(tokens[11].kind.is_operator(Operator::BangEqual));
+        assert!(tokens[12].kind.is_operator(Operator::Less));
+        assert!(tokens[13].kind.is_operator(Operator::LessEqual));
+        assert!(tokens[14].kind.is_operator(Operator::Greater));
+        assert!(tokens[15].kind.is_operator(Operator::GreaterEqual));
+        assert!(tokens[16].kind.is_operator(Operator::Dot));
+        assert!(tokens[17].kind.is_operator(Operator::Arrow));
+        assert!(tokens[18].kind.is_operator(Operator::FatArrow));
+    }
+
+    #[test]
+    pub fn lexer_can_produce_number_tokens() {
+        let source = "1 1.2 1.0 432";
+        let mut lexer = Lexer::default();
+        lexer.source = source.chars().collect();
+        let tokens = lexer.tokenize();
+        assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
+
+        assert_eq!(TokenKind::Number("1".into()), tokens[0].kind);
+        assert_eq!(TokenKind::Number("1.2".into()), tokens[1].kind);
+        assert_eq!(TokenKind::Number("1.0".into()), tokens[2].kind);
+        assert_eq!(TokenKind::Number("432".into()), tokens[3].kind);
+    }
+
+    #[test]
+    pub fn lexer_produces_eof_token_for_empty_input() {
+        let mut lexer = Lexer::default();
+        let tokens = lexer.tokenize();
+        assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
+    }
+}
+
+
+// ===== End of src/lexer.rs =====
+
+// ===== File: src/main.rs =====
+
+pub mod ast;
+pub mod error_handling;
+pub mod heap;
+pub mod keywords;
+pub mod lexer;
+pub mod object;
+pub mod parser;
+pub mod tokens;
+pub mod types;
+pub mod value;
+
+fn main() {
+    println!("Hello, world!");
+}
+
+
+// ===== End of src/main.rs =====
+
+// ===== File: src/object.rs =====
+
+use std::{cell::RefCell, rc::Rc};
+
+/// Represents any reference type object that
+/// is to be heap allocated
+#[derive(Debug, Clone, PartialEq)]
+pub enum Object {
+    String(String),
+}
+
+/// HeapObject is a wrapper type that contains metadata about
+/// an object for garbage collection and memory management.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeapObject {
+    /// When true, the object was reachable from GC roots
+    /// meaning that the object should not be collected.
+    pub marked: bool,
+    /// Next is the next object in the intrusive list. When None,
+    /// we've reached the end.
+    pub next: Option<Rc<RefCell<HeapObject>>>,
+    /// Object is the actual object contents stored in the wrapper.
+    pub object: Object,
+}
+
+impl HeapObject {
+    pub fn new(object: Object, next: Option<Rc<RefCell<HeapObject>>>) -> Self {
+        Self {
+            marked: false,
+            next,
+            object,
+        }
+    }
+
+    /// Get a slice of all child objects that this object references.
+    ///
+    /// # Returns
+    /// * A slice of objects referenced by this object.
+    pub fn children(&self) -> Vec<Rc<RefCell<HeapObject>>> {
+        match &self.object {
+            Object::String(_) => vec![],
+        }
+    }
+
+    /// Get the heap size of the object.
+    pub fn size(&self) -> usize {
+        let self_size = std::mem::size_of::<Self>();
+        let obj_size = match &self.object {
+            Object::String(s) => s.capacity(),
+        };
+
+        self_size + obj_size
+    }
+}
+
+
+// ===== End of src/object.rs =====
+
+// ===== File: src/parser.rs =====
+
+use crate::{
+    error_handling::Span,
+    tokens::{Special, Token, TokenKind},
+};
+
+#[derive(Debug, Clone)]
+pub struct Parser {
+    current: usize,
+    tokens: Vec<Token>,
+}
+
+impl Parser {
+    pub fn new(tokens: Vec<Token>) -> Self {
+        Self { current: 0, tokens }
+    }
+
+    pub fn parse(&mut self) {
+        todo!("create an ast to generate from the parser")
+    }
+
+    fn advance(&mut self) {
+        if self.is_at_end() {
+            return;
+        }
+
+        self.current += 1;
+    }
+
+    fn peek(&self) -> Token {
+        let default = Token::new(TokenKind::Special(Special::Eof), Span::default());
+        self.tokens
+            .get(self.current)
+            .map(|thing| thing.to_owned())
+            .unwrap_or_else(|| default)
+    }
+
+    fn is_at_end(&self) -> bool {
+        matches!(self.peek().kind, TokenKind::Special(Special::Eof))
+    }
+}
+
+
+// ===== End of src/parser.rs =====
+
+// ===== File: src/tokens.rs =====
+
+use crate::{error_handling::Span, keywords::Keyword};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TokenKind {
+    Number(String),
+    Identifier(String),
+    Keyword(Keyword),
+    Operator(Operator),
+    Delimiter(Delimiter),
+    Special(Special),
+}
+
+impl TokenKind {
+    pub fn is_keyword(&self, expected: Keyword) -> bool {
+        match self {
+            TokenKind::Keyword(self_kw) => *self_kw == expected,
+            _ => false,
+        }
+    }
+
+    pub fn is_operator(&self, expected: Operator) -> bool {
+        match self {
+            TokenKind::Operator(self_op) => *self_op == expected,
+            _ => false,
+        }
+    }
+
+    pub fn is_delimiter(&self, expected: Delimiter) -> bool {
+        match self {
+            TokenKind::Delimiter(self_delimiter) => *self_delimiter == expected,
+            _ => false,
+        }
+    }
+
+    pub fn is_special(&self, expected: Special) -> bool {
+        match self {
+            TokenKind::Special(self_kind) => *self_kind == expected,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operator {
+    Plus,
+    PlusEqual,
+    Minus,
+    MinusEqual,
+    Star,
+    StarEqual,
+    Slash,
+    SlashEqual,
+    Equal,
+    EqualEqual,
+    Bang,
+    BangEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Dot,
+    Arrow,
+    FatArrow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delimiter {
+    LeftParen,
+    RightParen,
+    LeftBrace,
+    RightBrace,
+    LeftBracket,
+    RightBracket,
+    Colon,
+    Semicolon,
+    Comma,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Special {
+    Eof,
+    Error(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub span: Span,
+}
+
+impl Token {
+    pub fn new(kind: TokenKind, span: Span) -> Self {
+        Self { kind, span }
+    }
+}
+
+
+// ===== End of src/tokens.rs =====
+
+// ===== File: src/types.rs =====
+
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -819,3 +1770,23 @@ mod tests {
         assert!(!unknown.is_assignable_to(&animal));
     }
 }
+
+
+// ===== End of src/types.rs =====
+
+// ===== File: src/value.rs =====
+
+use std::{cell::RefCell, rc::Rc};
+
+use crate::object::HeapObject;
+
+pub enum Value {
+    Number(f64),
+    Bool(bool),
+    Nil,
+    Object(Rc<RefCell<HeapObject>>),
+}
+
+
+// ===== End of src/value.rs =====
+
