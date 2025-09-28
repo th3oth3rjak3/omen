@@ -1,0 +1,10 @@
+if (1 < 2) {
+    print "1 less than 2";
+}
+
+if (false) {
+    // nothing happens
+    print "shouldn't be me!";
+} else {
+    print "took else branch";
+}

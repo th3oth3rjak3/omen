@@ -27,6 +27,12 @@ pub struct Parameter {
     pub param_type: Type,
 }
 
+impl Parameter {
+    pub fn new(name: String, param_type: Type) -> Self {
+        Self { name, param_type }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
     pub name: String,
@@ -56,6 +62,24 @@ pub enum Statement {
         value: Expression,
     },
     ExpressionStatement(Expression),
+    Print(Expression),
+    If {
+        condition: Expression,
+        then_branch: Box<Statement>,
+        else_branch: Option<Box<Statement>>,
+    },
+    Block(Vec<Statement>),
+    While {
+        condition: Expression,
+        body: Box<Statement>,
+    },
+    FunctionDeclaration {
+        name: String,
+        parameters: Vec<Parameter>,
+        return_type: Option<Type>,
+        body: Box<Statement>,
+    },
+    Return(Option<Expression>),
 }
 
 #[derive(Debug, Clone, PartialEq, Copy)]
@@ -96,4 +120,8 @@ pub enum Expression {
         right: Box<Expression>,
     },
     Nil,
+    Call {
+        name: String,
+        arguments: Vec<Expression>,
+    },
 }

@@ -1,0 +1,7 @@
+let a: Number = 1;
+let b: Number = 2;
+print a + b;
+
+let hello: String = "Hello";
+let world: String = " world!";
+print hello + world;

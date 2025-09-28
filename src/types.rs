@@ -2,12 +2,348 @@ use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use crate::ast::Program;
+
 lazy_static! {
     static ref CLASS_REGISTRY: RwLock<HashMap<String, ClassInfo>> = RwLock::new(HashMap::new());
 }
 
+use crate::ast::{BinaryOperator, Expression, Statement, UnaryOperator};
+
+#[derive(Debug, Clone)]
+pub struct TypeEnvironment {
+    scopes: Vec<HashMap<String, Type>>,
+}
+
+impl TypeEnvironment {
+    pub fn new() -> Self {
+        Self {
+            scopes: vec![HashMap::new()],
+        }
+    }
+
+    pub fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    pub fn pop_scope(&mut self) {
+        if self.scopes.len() > 1 {
+            self.scopes.pop();
+        }
+    }
+
+    pub fn define(&mut self, name: String, type_: Type) {
+        if let Some(current_scope) = self.scopes.last_mut() {
+            current_scope.insert(name, type_);
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Result<Type, String> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(type_) = scope.get(name) {
+                return Ok(type_.clone());
+            }
+        }
+        Err(format!("Undefined variable '{}'", name))
+    }
+}
+
+pub fn type_check_program(program: &Program) -> Result<(), String> {
+    let mut type_env = TypeEnvironment::new();
+
+    for statement in &program.statements {
+        type_check_statement(statement, &mut type_env, None)?;
+    }
+    Ok(())
+}
+
+fn type_check_statement(
+    stmt: &Statement,
+    env: &mut TypeEnvironment,
+    function_return_type: Option<&Type>,
+) -> Result<(), String> {
+    match stmt {
+        Statement::VarDeclaration {
+            name,
+            type_annotation,
+            initializer,
+        } => {
+            let init_type = type_check_expression(initializer, env)?;
+            if !init_type.is_assignable_to(type_annotation) {
+                return Err(format!(
+                    "Cannot assign {} to variable '{}' of type {}",
+                    type_to_string(&init_type),
+                    name,
+                    type_to_string(type_annotation)
+                ));
+            }
+            env.define(name.clone(), type_annotation.clone());
+            Ok(())
+        }
+        Statement::Assignment { name, value } => {
+            let var_type = env.get(name)?;
+            let value_type = type_check_expression(value, env)?;
+            if !value_type.is_assignable_to(&var_type) {
+                return Err(format!(
+                    "Cannot assign {} to variable '{}' of type {}",
+                    type_to_string(&value_type),
+                    name,
+                    type_to_string(&var_type)
+                ));
+            }
+            Ok(())
+        }
+        Statement::ExpressionStatement(expr) => {
+            type_check_expression(expr, env)?;
+            Ok(())
+        }
+        Statement::Print(expr) => {
+            type_check_expression(expr, env)?;
+            Ok(())
+        }
+        Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            let condition_type = type_check_expression(condition, env)?;
+            if condition_type != Type::Bool {
+                return Err(format!(
+                    "If condition must be boolean, got {}",
+                    type_to_string(&condition_type)
+                ));
+            }
+
+            type_check_statement(then_branch, env, function_return_type)?;
+            if let Some(else_stmt) = else_branch {
+                type_check_statement(else_stmt, env, function_return_type)?;
+            }
+            Ok(())
+        }
+        Statement::While { condition, body } => {
+            let condition_type = type_check_expression(condition, env)?;
+            if condition_type != Type::Bool {
+                return Err(format!(
+                    "While condition must be boolean, got {}",
+                    type_to_string(&condition_type)
+                ));
+            }
+            type_check_statement(body, env, function_return_type)?;
+            Ok(())
+        }
+        Statement::Block(statements) => {
+            for stmt in statements {
+                type_check_statement(stmt, env, function_return_type)?;
+            }
+            Ok(())
+        }
+        Statement::FunctionDeclaration {
+            name,
+            parameters,
+            return_type,
+            body,
+        } => {
+            let func_type = Type::Function {
+                params: parameters
+                    .iter()
+                    .map(|p| Box::new(p.param_type.clone()))
+                    .collect(),
+                return_types: match return_type {
+                    Some(t) => vec![Box::new(t.clone())],
+                    None => vec![],
+                },
+            };
+            env.define(name.clone(), func_type);
+
+            env.push_scope();
+            for p in parameters {
+                env.define(p.name.clone(), p.param_type.clone());
+            }
+            type_check_statement(body, env, return_type.as_ref())?; // Pass return type context
+            env.pop_scope();
+
+            Ok(())
+        }
+        Statement::Return(expr_opt) => {
+            match (expr_opt, function_return_type) {
+                (Some(expr), Some(expected_type)) => {
+                    let return_type = type_check_expression(expr, env)?;
+                    if !return_type.is_assignable_to(expected_type) {
+                        return Err(format!(
+                            "Return type {} doesn't match function return type {}",
+                            type_to_string(&return_type),
+                            type_to_string(expected_type)
+                        ));
+                    }
+                }
+                (Some(_), None) => {
+                    return Err("Cannot return value from void function".to_string());
+                }
+                (None, Some(_)) => {
+                    return Err("Function must return a value".to_string());
+                }
+                (None, None) => {
+                    // Void return from void function - OK
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn type_check_expression(expr: &Expression, env: &TypeEnvironment) -> Result<Type, String> {
+    match expr {
+        Expression::Number(_) => Ok(Type::Number),
+        Expression::Bool(_) => Ok(Type::Bool),
+        Expression::String(_) => Ok(Type::String),
+        Expression::Nil => Ok(Type::Nil),
+        Expression::Identifier(name) => env.get(name),
+        Expression::Unary { operator, operand } => {
+            let operand_type = type_check_expression(operand, env)?;
+            match operator {
+                UnaryOperator::Not => {
+                    if operand_type == Type::Bool {
+                        Ok(Type::Bool)
+                    } else {
+                        Err(format!(
+                            "Cannot apply '!' to {}",
+                            type_to_string(&operand_type)
+                        ))
+                    }
+                }
+                UnaryOperator::Negate => {
+                    if operand_type == Type::Number {
+                        Ok(Type::Number)
+                    } else {
+                        Err(format!("Cannot negate {}", type_to_string(&operand_type)))
+                    }
+                }
+            }
+        }
+        Expression::Binary {
+            left,
+            operator,
+            right,
+        } => {
+            let left_type = type_check_expression(left, env)?;
+            let right_type = type_check_expression(right, env)?;
+
+            match operator {
+                BinaryOperator::Add => {
+                    if left_type == Type::Number && right_type == Type::Number {
+                        Ok(Type::Number)
+                    } else if left_type == Type::String && right_type == Type::String {
+                        Ok(Type::String)
+                    } else {
+                        Err(format!(
+                            "Cannot add {} and {}",
+                            type_to_string(&left_type),
+                            type_to_string(&right_type)
+                        ))
+                    }
+                }
+                BinaryOperator::Subtract | BinaryOperator::Multiply | BinaryOperator::Divide => {
+                    if left_type == Type::Number && right_type == Type::Number {
+                        Ok(Type::Number)
+                    } else {
+                        Err(format!(
+                            "Cannot apply {:?} to {} and {}",
+                            operator,
+                            type_to_string(&left_type),
+                            type_to_string(&right_type)
+                        ))
+                    }
+                }
+                BinaryOperator::Less
+                | BinaryOperator::LessEqual
+                | BinaryOperator::Greater
+                | BinaryOperator::GreaterEqual => {
+                    if left_type == Type::Number && right_type == Type::Number {
+                        Ok(Type::Bool)
+                    } else {
+                        Err(format!(
+                            "Cannot compare {} and {} with {:?}",
+                            type_to_string(&left_type),
+                            type_to_string(&right_type),
+                            operator
+                        ))
+                    }
+                }
+                BinaryOperator::Equal | BinaryOperator::NotEqual => {
+                    // Allow equality comparison between same types
+                    if left_type == right_type {
+                        Ok(Type::Bool)
+                    } else {
+                        Err(format!(
+                            "Cannot compare {} and {} for equality",
+                            type_to_string(&left_type),
+                            type_to_string(&right_type)
+                        ))
+                    }
+                }
+                BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr => {
+                    if left_type == Type::Bool && right_type == Type::Bool {
+                        Ok(Type::Bool)
+                    } else {
+                        Err(format!(
+                            "Logical {:?} requires boolean operands, got {} and {}",
+                            operator,
+                            type_to_string(&left_type),
+                            type_to_string(&right_type)
+                        ))
+                    }
+                }
+            }
+        }
+        Expression::Call { name, arguments } => {
+            let func_type = env.get(name)?;
+            if let Type::Function {
+                params,
+                return_types,
+            } = func_type
+            {
+                if arguments.len() != params.len() {
+                    return Err(format!(
+                        "Function '{}' expects {} arguments, got {}",
+                        name,
+                        params.len(),
+                        arguments.len()
+                    ));
+                }
+
+                for (i, arg) in arguments.iter().enumerate() {
+                    let arg_type = type_check_expression(arg, env)?;
+                    if !arg_type.is_assignable_to(&params[i]) {
+                        return Err(format!("Argument {} type mismatch", i));
+                    }
+                }
+
+                if return_types.len() == 1 {
+                    Ok((*return_types[0]).clone())
+                } else {
+                    Ok(Type::Nil) // Void function
+                }
+            } else {
+                Err(format!("'{}' is not a function", name))
+            }
+        }
+    }
+}
+
+fn type_to_string(type_: &Type) -> String {
+    match type_ {
+        Type::Number => "Number".to_string(),
+        Type::Bool => "Bool".to_string(),
+        Type::String => "String".to_string(),
+        Type::Nil => "Nil".to_string(),
+        Type::Class(name) => name.clone(),
+        Type::Nullable(inner) => format!("{}?", type_to_string(inner)),
+        _ => format!("{:?}", type_), // For complex types not yet implemented
+    }
+}
+
 struct ClassInfo {
-    name: String,
+    _name: String,
     superclass: Option<String>,
 }
 
@@ -734,28 +1070,28 @@ mod tests {
         registry.insert(
             "Animal".to_string(),
             ClassInfo {
-                name: "Animal".to_string(),
+                _name: "Animal".to_string(),
                 superclass: None,
             },
         );
         registry.insert(
             "Dog".to_string(),
             ClassInfo {
-                name: "Dog".to_string(),
+                _name: "Dog".to_string(),
                 superclass: Some("Animal".to_string()),
             },
         );
         registry.insert(
             "Cat".to_string(),
             ClassInfo {
-                name: "Cat".to_string(),
+                _name: "Cat".to_string(),
                 superclass: Some("Animal".to_string()),
             },
         );
         registry.insert(
             "Poodle".to_string(),
             ClassInfo {
-                name: "Poodle".to_string(),
+                _name: "Poodle".to_string(),
                 superclass: Some("Dog".to_string()),
             },
         );

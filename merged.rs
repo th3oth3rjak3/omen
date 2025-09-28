@@ -31,6 +31,12 @@ pub struct Parameter {
     pub param_type: Type,
 }
 
+impl Parameter {
+    pub fn new(name: String, param_type: Type) -> Self {
+        Self { name, param_type }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
     pub name: String,
@@ -60,6 +66,24 @@ pub enum Statement {
         value: Expression,
     },
     ExpressionStatement(Expression),
+    Print(Expression),
+    If {
+        condition: Expression,
+        then_branch: Box<Statement>,
+        else_branch: Option<Box<Statement>>,
+    },
+    Block(Vec<Statement>),
+    While {
+        condition: Expression,
+        body: Box<Statement>,
+    },
+    FunctionDeclaration {
+        name: String,
+        parameters: Vec<Parameter>,
+        return_type: Option<Type>,
+        body: Box<Statement>,
+    },
+    Return(Option<Expression>),
 }
 
 #[derive(Debug, Clone, PartialEq, Copy)]
@@ -100,6 +124,10 @@ pub enum Expression {
         right: Box<Expression>,
     },
     Nil,
+    Call {
+        name: String,
+        arguments: Vec<Expression>,
+    },
 }
 
 
@@ -387,6 +415,7 @@ pub enum Keyword {
     False,
     And,
     Or,
+    Print,
 }
 
 impl TryFrom<&str> for Keyword {
@@ -411,6 +440,7 @@ impl TryFrom<&str> for Keyword {
             "false" => Ok(Keyword::False),
             "and" => Ok(Keyword::And),
             "or" => Ok(Keyword::Or),
+            "print" => Ok(Keyword::Print),
             _ => Err(format!("{value} is not a keyword")),
         }
     }
@@ -837,12 +867,74 @@ pub mod keywords;
 pub mod lexer;
 pub mod object;
 pub mod parser;
+pub mod runtime;
 pub mod tokens;
 pub mod types;
 pub mod value;
 
+use clap::{Parser, Subcommand};
+use std::fs;
+use std::path::PathBuf;
+
+use crate::types::type_check_program;
+
+#[derive(Parser)]
+#[command(name = "omen")]
+#[command(about = "The Omen programming language interpreter")]
+#[command(version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run an Omen script file
+    Run {
+        /// Path to the .omen file to execute
+        file: PathBuf,
+    },
+}
+
 fn main() {
-    println!("Hello, world!");
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Run { file } => {
+            if let Err(e) = run_file(file) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn run_file(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    // Check file extension
+    if file_path.extension().unwrap_or_default() != "omen" {
+        return Err("File must have .omen extension".into());
+    }
+
+    // Read the file
+    let source = fs::read_to_string(&file_path)?;
+
+    // Lex, parse, and interpret
+    let mut lexer = crate::lexer::Lexer::default();
+    lexer.source = source.chars().collect();
+
+    let tokens = lexer.tokenize();
+    let mut parser = crate::parser::Parser::new(tokens);
+    let program = parser.parse();
+
+    if let Err(type_error) = type_check_program(&program) {
+        eprintln!("Type error: {}", type_error);
+        std::process::exit(1);
+    }
+
+    let mut interpreter = crate::runtime::Interpreter::new();
+    interpreter.interpret(&program)?;
+
+    Ok(())
 }
 
 
@@ -852,11 +944,28 @@ fn main() {
 
 use std::{cell::RefCell, rc::Rc};
 
+use crate::{
+    ast::{Parameter, Statement},
+    runtime::Environment,
+    types::Type,
+    value::Value,
+};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Function {
+    pub name: String,
+    pub parameters: Vec<Parameter>,
+    pub return_type: Option<Type>,
+    pub body: Statement,
+    pub closure_env: Rc<RefCell<Environment>>, // Captured environment
+}
+
 /// Represents any reference type object that
 /// is to be heap allocated
 #[derive(Debug, Clone, PartialEq)]
 pub enum Object {
     String(String),
+    Function(Function),
 }
 
 /// HeapObject is a wrapper type that contains metadata about
@@ -889,7 +998,29 @@ impl HeapObject {
     pub fn children(&self) -> Vec<Rc<RefCell<HeapObject>>> {
         match &self.object {
             Object::String(_) => vec![],
+            Object::Function(fun) => {
+                // Return any heap objects referenced in the closure environment
+                // This will need to walk the environment and collect heap object references
+                self.collect_env_references(&fun.closure_env)
+            }
         }
+    }
+
+    fn collect_env_references(
+        &self,
+        env: &Rc<RefCell<Environment>>,
+    ) -> Vec<Rc<RefCell<HeapObject>>> {
+        let mut refs = vec![];
+        let env_borrow = env.borrow();
+        for scope in &env_borrow.scopes {
+            let borrow_scope = scope.borrow();
+            for value in borrow_scope.values() {
+                if let Value::Object(obj) = value {
+                    refs.push(obj.clone());
+                }
+            }
+        }
+        refs
     }
 
     /// Get the heap size of the object.
@@ -897,6 +1028,7 @@ impl HeapObject {
         let self_size = std::mem::size_of::<Self>();
         let obj_size = match &self.object {
             Object::String(s) => s.capacity(),
+            Object::Function(_) => std::mem::size_of::<Function>(),
         };
 
         self_size + obj_size
@@ -909,7 +1041,7 @@ impl HeapObject {
 // ===== File: src/parser.rs =====
 
 use crate::{
-    ast::{BinaryOperator, Expression, Program, Statement, UnaryOperator},
+    ast::{BinaryOperator, Expression, Parameter, Program, Statement, UnaryOperator},
     error_handling::Span,
     keywords::Keyword,
     tokens::{Delimiter, Operator, Special, Token, TokenKind},
@@ -940,7 +1072,16 @@ impl Parser {
 
     fn parse_statement(&mut self) -> Statement {
         match &self.peek().kind {
+            TokenKind::Delimiter(Delimiter::LeftBrace) => self.parse_block_statement(),
             TokenKind::Keyword(Keyword::Let) => self.parse_var_declaration(),
+            TokenKind::Keyword(Keyword::Print) => self.parse_print_statement(),
+            TokenKind::Keyword(Keyword::If) => self.parse_if_statement(),
+            TokenKind::Keyword(Keyword::While) => self.parse_while_statement(),
+            TokenKind::Keyword(Keyword::Function) => self.parse_function_declaration(),
+            TokenKind::Keyword(Keyword::Return) => self.parse_return_statement(),
+            TokenKind::Identifier(ident) if self.peek_next().kind.is_operator(Operator::Equal) => {
+                self.parse_assignment(ident.to_owned())
+            }
             _ => {
                 // Default to expression statement
                 let expr = self.parse_expression();
@@ -1004,7 +1145,6 @@ impl Parser {
 
         // Parse initializer expression
         let initializer = self.parse_expression();
-        println!("INITIALIZER: {:#?}", initializer);
 
         // Consume semicolon
         self.consume_delimiter(Delimiter::Semicolon);
@@ -1013,6 +1153,129 @@ impl Parser {
             name,
             type_annotation,
             initializer,
+        }
+    }
+
+    fn parse_print_statement(&mut self) -> Statement {
+        self.advance(); // consume 'print'
+        let expr = self.parse_expression();
+        self.consume_delimiter(Delimiter::Semicolon);
+        Statement::Print(expr)
+    }
+
+    fn parse_return_statement(&mut self) -> Statement {
+        self.advance(); // consume 'return';
+        let mut return_expr: Option<Expression> = None;
+
+        if self.peek().kind.is_delimiter(Delimiter::Semicolon) {
+        } else {
+            let expr = self.parse_expression();
+            return_expr = Some(expr);
+        }
+
+        self.consume_delimiter(Delimiter::Semicolon);
+        Statement::Return(return_expr)
+    }
+
+    fn parse_assignment(&mut self, ident: String) -> Statement {
+        self.advance(); // skip over the name
+        self.advance(); // skip over the =
+        let expr = self.parse_expression();
+        self.consume_delimiter(Delimiter::Semicolon);
+
+        Statement::Assignment {
+            name: ident,
+            value: expr,
+        }
+    }
+
+    fn parse_if_statement(&mut self) -> Statement {
+        self.advance(); // consume 'if'
+        let condition = self.parse_expression();
+        let then_branch = Box::new(self.parse_statement());
+
+        let else_branch = if self.peek().kind.is_keyword(Keyword::Else) {
+            self.advance(); // consume 'else'
+            Some(Box::new(self.parse_statement()))
+        } else {
+            None
+        };
+
+        Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+        }
+    }
+
+    fn parse_while_statement(&mut self) -> Statement {
+        self.advance(); // consume 'while'
+        let condition = self.parse_expression();
+        let body = Box::new(self.parse_statement());
+        Statement::While { condition, body }
+    }
+
+    fn parse_block_statement(&mut self) -> Statement {
+        self.consume_delimiter(Delimiter::LeftBrace);
+        let mut statements = Vec::new();
+
+        while !self.peek().kind.is_delimiter(Delimiter::RightBrace) && !self.is_at_end() {
+            statements.push(self.parse_statement());
+        }
+
+        self.consume_delimiter(Delimiter::RightBrace);
+        Statement::Block(statements)
+    }
+
+    fn parse_function_declaration(&mut self) -> Statement {
+        self.advance(); // consume 'fn'
+
+        let name = if let TokenKind::Identifier(id) = &self.peek().kind {
+            let n = id.clone();
+            self.advance();
+            n
+        } else {
+            panic!("Expected function name");
+        };
+
+        self.consume_delimiter(Delimiter::LeftParen);
+
+        let mut parameters: Vec<Parameter> = Vec::new();
+        while !self.peek().kind.is_delimiter(Delimiter::RightParen) {
+            let param_name = if let TokenKind::Identifier(id) = &self.peek().kind {
+                let n = id.clone();
+                self.advance();
+                n
+            } else {
+                panic!("Expected parameter name");
+            };
+
+            self.consume_delimiter(Delimiter::Colon);
+            let param_type = self.parse_type();
+
+            parameters.push(Parameter::new(param_name, param_type));
+
+            if self.peek().kind.is_delimiter(Delimiter::Comma) {
+                self.advance(); // consume comma
+            }
+        }
+
+        self.consume_delimiter(Delimiter::RightParen);
+
+        let return_type = if self.peek().kind.is_operator(Operator::Arrow) {
+            self.advance();
+            Some(self.parse_type())
+        } else {
+            None
+        };
+
+        let body = Box::new(self.parse_statement()); // Usually a block
+
+        Statement::FunctionDeclaration {
+            name,
+            parameters,
+            return_type,
+            body,
         }
     }
 
@@ -1220,9 +1483,36 @@ impl Parser {
                 self.handle_boolean_literal()
             }
             TokenKind::Keyword(Keyword::Nil) => self.handle_nil_literal(),
-            TokenKind::Identifier(_) => self.handle_identifier(),
+            TokenKind::Identifier(name) => self.handle_identifier(name),
             TokenKind::Delimiter(Delimiter::LeftParen) => self.handle_grouped_expression(),
             _ => Expression::Nil,
+        }
+    }
+
+    fn handle_identifier(&mut self, name: String) -> Expression {
+        let identifier = name.clone();
+        self.advance();
+
+        if self.peek().kind.is_delimiter(Delimiter::LeftParen) {
+            // Function call
+            self.advance(); // consume '('
+            let mut arguments = Vec::new();
+
+            while !self.peek().kind.is_delimiter(Delimiter::RightParen) {
+                arguments.push(self.parse_expression());
+                if self.peek().kind.is_delimiter(Delimiter::Comma) {
+                    self.advance();
+                }
+            }
+
+            self.consume_delimiter(Delimiter::RightParen);
+            Expression::Call {
+                name: identifier,
+                arguments,
+            }
+        } else {
+            // Variable reference
+            Expression::Identifier(identifier)
         }
     }
 
@@ -1261,16 +1551,6 @@ impl Parser {
         Expression::Nil
     }
 
-    fn handle_identifier(&mut self) -> Expression {
-        if let TokenKind::Identifier(name) = &self.peek().kind {
-            let identifier = name.clone();
-            self.advance();
-            Expression::Identifier(identifier)
-        } else {
-            panic!("Expected identifier");
-        }
-    }
-
     fn handle_grouped_expression(&mut self) -> Expression {
         self.consume_delimiter(Delimiter::LeftParen);
         let expr = self.parse_expression();
@@ -1306,6 +1586,14 @@ impl Parser {
         let default = Token::new(TokenKind::Special(Special::Eof), Span::default());
         self.tokens
             .get(self.current)
+            .map(|thing| thing.to_owned())
+            .unwrap_or_else(|| default)
+    }
+
+    fn peek_next(&self) -> Token {
+        let default = Token::new(TokenKind::Special(Special::Eof), Span::default());
+        self.tokens
+            .get(self.current + 1)
             .map(|thing| thing.to_owned())
             .unwrap_or_else(|| default)
     }
@@ -1701,10 +1989,404 @@ mod tests {
 
         assert_eq!(expected, ast);
     }
+
+    #[test]
+    pub fn parser_can_parse_assignment_statements() {
+        let mut lexer = Lexer::default();
+        lexer.source = "let x: Number = 1; x = 2;".chars().collect();
+
+        let tokens = lexer.tokenize();
+        println!("TOKENS: {:#?}", tokens);
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse();
+
+        println!("AST: {:#?}", ast);
+
+        let expected = Program {
+            statements: vec![
+                Statement::VarDeclaration {
+                    name: "x".to_string(),
+                    type_annotation: Type::Number,
+                    initializer: Expression::Number(1.),
+                },
+                Statement::Assignment {
+                    name: "x".into(),
+                    value: Expression::Number(2.),
+                },
+            ],
+        };
+
+        assert_eq!(expected, ast);
+    }
 }
 
 
 // ===== End of src/parser.rs =====
+
+// ===== File: src/runtime.rs =====
+
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
+use crate::{
+    ast::{BinaryOperator, Expression, Program, Statement, UnaryOperator},
+    heap::Heap,
+    object::{Function, HeapObject, Object},
+    value::Value,
+};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Environment {
+    pub scopes: Vec<Rc<RefCell<HashMap<String, Value>>>>,
+}
+
+impl Environment {
+    pub fn new() -> Self {
+        Self {
+            scopes: vec![Rc::new(RefCell::new(HashMap::new()))], // Start with global scope
+        }
+    }
+
+    pub fn push_scope(&mut self) {
+        self.scopes.push(Rc::new(RefCell::new(HashMap::new())));
+    }
+
+    pub fn pop_scope(&mut self) {
+        if self.scopes.len() > 1 {
+            self.scopes.pop();
+        }
+    }
+
+    pub fn define(&mut self, name: String, value: Value) {
+        if let Some(current_scope) = self.scopes.last_mut() {
+            current_scope.borrow_mut().insert(name, value);
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Result<Value, String> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(value) = scope.borrow().get(name) {
+                return Ok(value.clone());
+            }
+        }
+        Err(format!("Undefined variable '{}'", name))
+    }
+
+    pub fn assign(&mut self, name: &str, value: Value) -> Result<Option<Value>, String> {
+        for scope in self.scopes.iter().rev() {
+            if scope.borrow().contains_key(name) {
+                scope.borrow_mut().insert(name.to_string(), value);
+                return Ok(None);
+            }
+        }
+        Err(format!("Undefined variable '{}'", name))
+    }
+}
+
+pub struct Interpreter {
+    environment: Environment,
+    heap: Heap,
+}
+
+impl Interpreter {
+    pub fn new() -> Self {
+        Self {
+            environment: Environment::new(),
+            heap: Heap::new(1024),
+        }
+    }
+
+    pub fn interpret(&mut self, program: &Program) -> Result<(), String> {
+        for statement in &program.statements {
+            self.execute_statement(statement)?;
+        }
+        Ok(())
+    }
+
+    fn allocate_object(&mut self, object: Object) -> Rc<RefCell<HeapObject>> {
+        self.heap.allocate(object)
+    }
+
+    fn execute_statement(&mut self, stmt: &Statement) -> Result<Option<Value>, String> {
+        match stmt {
+            Statement::ExpressionStatement(expr) => {
+                // Evaluate the expression but discard the result
+                self.evaluate_expression(expr)?;
+                Ok(None)
+            }
+            Statement::VarDeclaration {
+                name, initializer, ..
+            } => {
+                let value = self.evaluate_expression(initializer)?;
+                self.environment.define(name.clone(), value);
+                Ok(None)
+            }
+            Statement::Assignment { name, value } => {
+                let val = self.evaluate_expression(value)?;
+                self.environment.assign(name, val)
+            }
+            Statement::Print(expr) => {
+                let value = self.evaluate_expression(expr)?;
+                println!("{}", self.value_to_string(&value));
+                Ok(None)
+            }
+            Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let condition_value = self.evaluate_expression(condition)?;
+                let should_execute = match condition_value {
+                    Value::Bool(b) => b,
+                    _ => return Err("If condition must be boolean".to_string()),
+                };
+
+                let mut result: Option<Value> = None;
+
+                if should_execute {
+                    result = self.execute_statement(then_branch)?;
+                } else if let Some(else_stmt) = else_branch {
+                    result = self.execute_statement(else_stmt)?;
+                }
+                Ok(result)
+            }
+            Statement::Block(statements) => {
+                for stmt in statements {
+                    let result = self.execute_statement(stmt)?;
+                    if let Some(v) = result {
+                        return Ok(Some(v));
+                    }
+                }
+                Ok(None)
+            }
+            Statement::While { condition, body } => {
+                loop {
+                    let condition_value = self.evaluate_expression(condition)?;
+                    let should_continue = match condition_value {
+                        Value::Bool(b) => b,
+                        _ => return Err("While condition must be boolean".to_string()),
+                    };
+
+                    if !should_continue {
+                        break;
+                    }
+
+                    self.execute_statement(body)?;
+                }
+                Ok(None)
+            }
+            Statement::FunctionDeclaration {
+                name,
+                parameters,
+                return_type,
+                body,
+            } => {
+                let function_obj = Object::Function(Function {
+                    name: name.clone(),
+                    parameters: parameters.clone(),
+                    return_type: return_type.clone(),
+                    body: *body.clone(),
+                    closure_env: Rc::new(RefCell::new(self.environment.clone())), // Capture current environment
+                });
+
+                let heap_obj = self.allocate_object(function_obj);
+                self.environment
+                    .define(name.clone(), Value::Object(heap_obj));
+
+                Ok(None)
+            }
+            Statement::Return(expr_opt) => {
+                let return_value = match expr_opt {
+                    Some(expr) => self.evaluate_expression(expr)?,
+                    None => Value::Nil,
+                };
+
+                Ok(Some(return_value)) // Use Some to indicate early return
+            }
+        }
+    }
+
+    fn evaluate_expression(&mut self, expr: &Expression) -> Result<Value, String> {
+        match expr {
+            Expression::Number(n) => Ok(Value::Number(*n)),
+            Expression::Bool(b) => Ok(Value::Bool(*b)),
+            Expression::String(s) => Ok(Value::String(s.clone())),
+            Expression::Nil => Ok(Value::Nil),
+            Expression::Identifier(name) => self.environment.get(name),
+            Expression::Unary { operator, operand } => {
+                let val = self.evaluate_expression(operand)?;
+                self.evaluate_unary(operator, val)
+            }
+            Expression::Binary {
+                left,
+                operator,
+                right,
+            } => {
+                let left_val = self.evaluate_expression(left)?;
+                let right_val = self.evaluate_expression(right)?;
+                self.evaluate_binary(&left_val, operator, &right_val)
+            }
+            Expression::Call { name, arguments } => {
+                let function_value = self.environment.get(name)?;
+
+                let function = match function_value {
+                    Value::Object(obj) => {
+                        let obj_borrow = obj.borrow();
+                        match &obj_borrow.object {
+                            Object::Function(Function {
+                                parameters,
+                                body,
+                                closure_env,
+                                ..
+                            }) => (parameters.clone(), body.clone(), closure_env.clone()),
+                            _ => return Err(format!("'{}' is not a function", name)),
+                        }
+                    }
+                    _ => return Err(format!("'{}' is not a function", name)),
+                };
+
+                let (parameters, body, closure_env) = function;
+
+                if arguments.len() != parameters.len() {
+                    return Err(format!(
+                        "Function '{}' expects {} arguments, got {}",
+                        name,
+                        parameters.len(),
+                        arguments.len()
+                    ));
+                }
+
+                // Create new environment starting with closure environment
+                let mut call_env = (*closure_env.borrow()).clone();
+                call_env.push_scope();
+
+                // Evaluate arguments and bind to parameters
+                for (i, p) in parameters.iter().enumerate() {
+                    let arg_value = self.evaluate_expression(&arguments[i])?;
+                    call_env.define(p.name.clone(), arg_value);
+                }
+
+                // Save current environment and switch to call environment
+                let saved_env = std::mem::replace(&mut self.environment, call_env);
+
+                // Execute function body
+                let result = self.execute_statement(&body);
+                println!("FUNCTION RESULT: {:#?}", result);
+
+                // Restore environment
+                self.environment = saved_env;
+
+                match result {
+                    Ok(Some(return_value)) => Ok(return_value), // Function returned a value
+                    Ok(None) => Ok(Value::Nil),                 // Function completed without return
+                    Err(e) => Err(e),
+                }
+            }
+        }
+    }
+
+    fn evaluate_unary(&self, operator: &UnaryOperator, operand: Value) -> Result<Value, String> {
+        match operator {
+            UnaryOperator::Not => match operand {
+                Value::Bool(b) => Ok(Value::Bool(!b)),
+                _ => Err("Cannot apply '!' to non-boolean value".to_string()),
+            },
+            UnaryOperator::Negate => match operand {
+                Value::Number(n) => Ok(Value::Number(-n)),
+                _ => Err("Cannot negate non-number value".to_string()),
+            },
+        }
+    }
+
+    fn evaluate_binary(
+        &self,
+        left: &Value,
+        operator: &BinaryOperator,
+        right: &Value,
+    ) -> Result<Value, String> {
+        match operator {
+            // Arithmetic operators
+            BinaryOperator::Add => match (left, right) {
+                (Value::Number(l), Value::Number(r)) => Ok(Value::Number(l + r)),
+                (Value::String(l), Value::String(r)) => Ok(Value::String(format!("{}{}", l, r))),
+                _ => Err("Cannot add incompatible types".to_string()),
+            },
+            BinaryOperator::Subtract => match (left, right) {
+                (Value::Number(l), Value::Number(r)) => Ok(Value::Number(l - r)),
+                _ => Err("Cannot subtract non-number values".to_string()),
+            },
+            BinaryOperator::Multiply => match (left, right) {
+                (Value::Number(l), Value::Number(r)) => Ok(Value::Number(l * r)),
+                _ => Err("Cannot multiply non-number values".to_string()),
+            },
+            BinaryOperator::Divide => match (left, right) {
+                (Value::Number(l), Value::Number(r)) => {
+                    if *r == 0.0 {
+                        Err("Division by zero".to_string())
+                    } else {
+                        Ok(Value::Number(l / r))
+                    }
+                }
+                _ => Err("Cannot divide non-number values".to_string()),
+            },
+
+            // Comparison operators
+            BinaryOperator::Less => match (left, right) {
+                (Value::Number(l), Value::Number(r)) => Ok(Value::Bool(l < r)),
+                _ => Err("Cannot compare non-number values with <".to_string()),
+            },
+            BinaryOperator::LessEqual => match (left, right) {
+                (Value::Number(l), Value::Number(r)) => Ok(Value::Bool(l <= r)),
+                _ => Err("Cannot compare non-number values with <=".to_string()),
+            },
+            BinaryOperator::Greater => match (left, right) {
+                (Value::Number(l), Value::Number(r)) => Ok(Value::Bool(l > r)),
+                _ => Err("Cannot compare non-number values with >".to_string()),
+            },
+            BinaryOperator::GreaterEqual => match (left, right) {
+                (Value::Number(l), Value::Number(r)) => Ok(Value::Bool(l >= r)),
+                _ => Err("Cannot compare non-number values with >=".to_string()),
+            },
+
+            // Equality operators
+            BinaryOperator::Equal => Ok(Value::Bool(self.values_equal(left, right))),
+            BinaryOperator::NotEqual => Ok(Value::Bool(!self.values_equal(left, right))),
+
+            // Logical operators - require explicit booleans
+            BinaryOperator::LogicalAnd => match (left, right) {
+                (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(*l && *r)),
+                _ => Err("Logical 'and' requires boolean operands".to_string()),
+            },
+            BinaryOperator::LogicalOr => match (left, right) {
+                (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(*l || *r)),
+                _ => Err("Logical 'or' requires boolean operands".to_string()),
+            },
+        }
+    }
+
+    // Helper methods
+    fn values_equal(&self, left: &Value, right: &Value) -> bool {
+        match (left, right) {
+            (Value::Number(l), Value::Number(r)) => l == r,
+            (Value::Bool(l), Value::Bool(r)) => l == r,
+            (Value::String(l), Value::String(r)) => l == r,
+            (Value::Nil, Value::Nil) => true,
+            _ => false,
+        }
+    }
+
+    fn value_to_string(&self, value: &Value) -> String {
+        match value {
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::String(s) => s.clone(),
+            Value::Nil => "nil".to_string(),
+            _ => "object".into(),
+        }
+    }
+}
+
+
+// ===== End of src/runtime.rs =====
 
 // ===== File: src/tokens.rs =====
 
@@ -1815,12 +2497,348 @@ use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use crate::ast::Program;
+
 lazy_static! {
     static ref CLASS_REGISTRY: RwLock<HashMap<String, ClassInfo>> = RwLock::new(HashMap::new());
 }
 
+use crate::ast::{BinaryOperator, Expression, Statement, UnaryOperator};
+
+#[derive(Debug, Clone)]
+pub struct TypeEnvironment {
+    scopes: Vec<HashMap<String, Type>>,
+}
+
+impl TypeEnvironment {
+    pub fn new() -> Self {
+        Self {
+            scopes: vec![HashMap::new()],
+        }
+    }
+
+    pub fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    pub fn pop_scope(&mut self) {
+        if self.scopes.len() > 1 {
+            self.scopes.pop();
+        }
+    }
+
+    pub fn define(&mut self, name: String, type_: Type) {
+        if let Some(current_scope) = self.scopes.last_mut() {
+            current_scope.insert(name, type_);
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Result<Type, String> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(type_) = scope.get(name) {
+                return Ok(type_.clone());
+            }
+        }
+        Err(format!("Undefined variable '{}'", name))
+    }
+}
+
+pub fn type_check_program(program: &Program) -> Result<(), String> {
+    let mut type_env = TypeEnvironment::new();
+
+    for statement in &program.statements {
+        type_check_statement(statement, &mut type_env, None)?;
+    }
+    Ok(())
+}
+
+fn type_check_statement(
+    stmt: &Statement,
+    env: &mut TypeEnvironment,
+    function_return_type: Option<&Type>,
+) -> Result<(), String> {
+    match stmt {
+        Statement::VarDeclaration {
+            name,
+            type_annotation,
+            initializer,
+        } => {
+            let init_type = type_check_expression(initializer, env)?;
+            if !init_type.is_assignable_to(type_annotation) {
+                return Err(format!(
+                    "Cannot assign {} to variable '{}' of type {}",
+                    type_to_string(&init_type),
+                    name,
+                    type_to_string(type_annotation)
+                ));
+            }
+            env.define(name.clone(), type_annotation.clone());
+            Ok(())
+        }
+        Statement::Assignment { name, value } => {
+            let var_type = env.get(name)?;
+            let value_type = type_check_expression(value, env)?;
+            if !value_type.is_assignable_to(&var_type) {
+                return Err(format!(
+                    "Cannot assign {} to variable '{}' of type {}",
+                    type_to_string(&value_type),
+                    name,
+                    type_to_string(&var_type)
+                ));
+            }
+            Ok(())
+        }
+        Statement::ExpressionStatement(expr) => {
+            type_check_expression(expr, env)?;
+            Ok(())
+        }
+        Statement::Print(expr) => {
+            type_check_expression(expr, env)?;
+            Ok(())
+        }
+        Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            let condition_type = type_check_expression(condition, env)?;
+            if condition_type != Type::Bool {
+                return Err(format!(
+                    "If condition must be boolean, got {}",
+                    type_to_string(&condition_type)
+                ));
+            }
+
+            type_check_statement(then_branch, env, function_return_type)?;
+            if let Some(else_stmt) = else_branch {
+                type_check_statement(else_stmt, env, function_return_type)?;
+            }
+            Ok(())
+        }
+        Statement::While { condition, body } => {
+            let condition_type = type_check_expression(condition, env)?;
+            if condition_type != Type::Bool {
+                return Err(format!(
+                    "While condition must be boolean, got {}",
+                    type_to_string(&condition_type)
+                ));
+            }
+            type_check_statement(body, env, function_return_type)?;
+            Ok(())
+        }
+        Statement::Block(statements) => {
+            for stmt in statements {
+                type_check_statement(stmt, env, function_return_type)?;
+            }
+            Ok(())
+        }
+        Statement::FunctionDeclaration {
+            name,
+            parameters,
+            return_type,
+            body,
+        } => {
+            let func_type = Type::Function {
+                params: parameters
+                    .iter()
+                    .map(|p| Box::new(p.param_type.clone()))
+                    .collect(),
+                return_types: match return_type {
+                    Some(t) => vec![Box::new(t.clone())],
+                    None => vec![],
+                },
+            };
+            env.define(name.clone(), func_type);
+
+            env.push_scope();
+            for p in parameters {
+                env.define(p.name.clone(), p.param_type.clone());
+            }
+            type_check_statement(body, env, return_type.as_ref())?; // Pass return type context
+            env.pop_scope();
+
+            Ok(())
+        }
+        Statement::Return(expr_opt) => {
+            match (expr_opt, function_return_type) {
+                (Some(expr), Some(expected_type)) => {
+                    let return_type = type_check_expression(expr, env)?;
+                    if !return_type.is_assignable_to(expected_type) {
+                        return Err(format!(
+                            "Return type {} doesn't match function return type {}",
+                            type_to_string(&return_type),
+                            type_to_string(expected_type)
+                        ));
+                    }
+                }
+                (Some(_), None) => {
+                    return Err("Cannot return value from void function".to_string());
+                }
+                (None, Some(_)) => {
+                    return Err("Function must return a value".to_string());
+                }
+                (None, None) => {
+                    // Void return from void function - OK
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn type_check_expression(expr: &Expression, env: &TypeEnvironment) -> Result<Type, String> {
+    match expr {
+        Expression::Number(_) => Ok(Type::Number),
+        Expression::Bool(_) => Ok(Type::Bool),
+        Expression::String(_) => Ok(Type::String),
+        Expression::Nil => Ok(Type::Nil),
+        Expression::Identifier(name) => env.get(name),
+        Expression::Unary { operator, operand } => {
+            let operand_type = type_check_expression(operand, env)?;
+            match operator {
+                UnaryOperator::Not => {
+                    if operand_type == Type::Bool {
+                        Ok(Type::Bool)
+                    } else {
+                        Err(format!(
+                            "Cannot apply '!' to {}",
+                            type_to_string(&operand_type)
+                        ))
+                    }
+                }
+                UnaryOperator::Negate => {
+                    if operand_type == Type::Number {
+                        Ok(Type::Number)
+                    } else {
+                        Err(format!("Cannot negate {}", type_to_string(&operand_type)))
+                    }
+                }
+            }
+        }
+        Expression::Binary {
+            left,
+            operator,
+            right,
+        } => {
+            let left_type = type_check_expression(left, env)?;
+            let right_type = type_check_expression(right, env)?;
+
+            match operator {
+                BinaryOperator::Add => {
+                    if left_type == Type::Number && right_type == Type::Number {
+                        Ok(Type::Number)
+                    } else if left_type == Type::String && right_type == Type::String {
+                        Ok(Type::String)
+                    } else {
+                        Err(format!(
+                            "Cannot add {} and {}",
+                            type_to_string(&left_type),
+                            type_to_string(&right_type)
+                        ))
+                    }
+                }
+                BinaryOperator::Subtract | BinaryOperator::Multiply | BinaryOperator::Divide => {
+                    if left_type == Type::Number && right_type == Type::Number {
+                        Ok(Type::Number)
+                    } else {
+                        Err(format!(
+                            "Cannot apply {:?} to {} and {}",
+                            operator,
+                            type_to_string(&left_type),
+                            type_to_string(&right_type)
+                        ))
+                    }
+                }
+                BinaryOperator::Less
+                | BinaryOperator::LessEqual
+                | BinaryOperator::Greater
+                | BinaryOperator::GreaterEqual => {
+                    if left_type == Type::Number && right_type == Type::Number {
+                        Ok(Type::Bool)
+                    } else {
+                        Err(format!(
+                            "Cannot compare {} and {} with {:?}",
+                            type_to_string(&left_type),
+                            type_to_string(&right_type),
+                            operator
+                        ))
+                    }
+                }
+                BinaryOperator::Equal | BinaryOperator::NotEqual => {
+                    // Allow equality comparison between same types
+                    if left_type == right_type {
+                        Ok(Type::Bool)
+                    } else {
+                        Err(format!(
+                            "Cannot compare {} and {} for equality",
+                            type_to_string(&left_type),
+                            type_to_string(&right_type)
+                        ))
+                    }
+                }
+                BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr => {
+                    if left_type == Type::Bool && right_type == Type::Bool {
+                        Ok(Type::Bool)
+                    } else {
+                        Err(format!(
+                            "Logical {:?} requires boolean operands, got {} and {}",
+                            operator,
+                            type_to_string(&left_type),
+                            type_to_string(&right_type)
+                        ))
+                    }
+                }
+            }
+        }
+        Expression::Call { name, arguments } => {
+            let func_type = env.get(name)?;
+            if let Type::Function {
+                params,
+                return_types,
+            } = func_type
+            {
+                if arguments.len() != params.len() {
+                    return Err(format!(
+                        "Function '{}' expects {} arguments, got {}",
+                        name,
+                        params.len(),
+                        arguments.len()
+                    ));
+                }
+
+                for (i, arg) in arguments.iter().enumerate() {
+                    let arg_type = type_check_expression(arg, env)?;
+                    if !arg_type.is_assignable_to(&params[i]) {
+                        return Err(format!("Argument {} type mismatch", i));
+                    }
+                }
+
+                if return_types.len() == 1 {
+                    Ok((*return_types[0]).clone())
+                } else {
+                    Ok(Type::Nil) // Void function
+                }
+            } else {
+                Err(format!("'{}' is not a function", name))
+            }
+        }
+    }
+}
+
+fn type_to_string(type_: &Type) -> String {
+    match type_ {
+        Type::Number => "Number".to_string(),
+        Type::Bool => "Bool".to_string(),
+        Type::String => "String".to_string(),
+        Type::Nil => "Nil".to_string(),
+        Type::Class(name) => name.clone(),
+        Type::Nullable(inner) => format!("{}?", type_to_string(inner)),
+        _ => format!("{:?}", type_), // For complex types not yet implemented
+    }
+}
+
 struct ClassInfo {
-    name: String,
+    _name: String,
     superclass: Option<String>,
 }
 
@@ -2547,28 +3565,28 @@ mod tests {
         registry.insert(
             "Animal".to_string(),
             ClassInfo {
-                name: "Animal".to_string(),
+                _name: "Animal".to_string(),
                 superclass: None,
             },
         );
         registry.insert(
             "Dog".to_string(),
             ClassInfo {
-                name: "Dog".to_string(),
+                _name: "Dog".to_string(),
                 superclass: Some("Animal".to_string()),
             },
         );
         registry.insert(
             "Cat".to_string(),
             ClassInfo {
-                name: "Cat".to_string(),
+                _name: "Cat".to_string(),
                 superclass: Some("Animal".to_string()),
             },
         );
         registry.insert(
             "Poodle".to_string(),
             ClassInfo {
-                name: "Poodle".to_string(),
+                _name: "Poodle".to_string(),
                 superclass: Some("Dog".to_string()),
             },
         );
@@ -2623,10 +3641,12 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::object::HeapObject;
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Number(f64),
     Bool(bool),
     Nil,
+    String(String),
     Object(Rc<RefCell<HeapObject>>),
 }
 

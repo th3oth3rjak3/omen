@@ -17,6 +17,7 @@ pub enum Keyword {
     False,
     And,
     Or,
+    Print,
 }
 
 impl TryFrom<&str> for Keyword {
@@ -41,6 +42,7 @@ impl TryFrom<&str> for Keyword {
             "false" => Ok(Keyword::False),
             "and" => Ok(Keyword::And),
             "or" => Ok(Keyword::Or),
+            "print" => Ok(Keyword::Print),
             _ => Err(format!("{value} is not a keyword")),
         }
     }

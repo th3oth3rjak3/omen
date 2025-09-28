@@ -1,5 +1,5 @@
 use crate::{
-    ast::{BinaryOperator, Expression, Program, Statement, UnaryOperator},
+    ast::{BinaryOperator, Expression, Parameter, Program, Statement, UnaryOperator},
     error_handling::Span,
     keywords::Keyword,
     tokens::{Delimiter, Operator, Special, Token, TokenKind},
@@ -30,7 +30,16 @@ impl Parser {
 
     fn parse_statement(&mut self) -> Statement {
         match &self.peek().kind {
+            TokenKind::Delimiter(Delimiter::LeftBrace) => self.parse_block_statement(),
             TokenKind::Keyword(Keyword::Let) => self.parse_var_declaration(),
+            TokenKind::Keyword(Keyword::Print) => self.parse_print_statement(),
+            TokenKind::Keyword(Keyword::If) => self.parse_if_statement(),
+            TokenKind::Keyword(Keyword::While) => self.parse_while_statement(),
+            TokenKind::Keyword(Keyword::Function) => self.parse_function_declaration(),
+            TokenKind::Keyword(Keyword::Return) => self.parse_return_statement(),
+            TokenKind::Identifier(ident) if self.peek_next().kind.is_operator(Operator::Equal) => {
+                self.parse_assignment(ident.to_owned())
+            }
             _ => {
                 // Default to expression statement
                 let expr = self.parse_expression();
@@ -94,7 +103,6 @@ impl Parser {
 
         // Parse initializer expression
         let initializer = self.parse_expression();
-        println!("INITIALIZER: {:#?}", initializer);
 
         // Consume semicolon
         self.consume_delimiter(Delimiter::Semicolon);
@@ -103,6 +111,129 @@ impl Parser {
             name,
             type_annotation,
             initializer,
+        }
+    }
+
+    fn parse_print_statement(&mut self) -> Statement {
+        self.advance(); // consume 'print'
+        let expr = self.parse_expression();
+        self.consume_delimiter(Delimiter::Semicolon);
+        Statement::Print(expr)
+    }
+
+    fn parse_return_statement(&mut self) -> Statement {
+        self.advance(); // consume 'return';
+        let mut return_expr: Option<Expression> = None;
+
+        if self.peek().kind.is_delimiter(Delimiter::Semicolon) {
+        } else {
+            let expr = self.parse_expression();
+            return_expr = Some(expr);
+        }
+
+        self.consume_delimiter(Delimiter::Semicolon);
+        Statement::Return(return_expr)
+    }
+
+    fn parse_assignment(&mut self, ident: String) -> Statement {
+        self.advance(); // skip over the name
+        self.advance(); // skip over the =
+        let expr = self.parse_expression();
+        self.consume_delimiter(Delimiter::Semicolon);
+
+        Statement::Assignment {
+            name: ident,
+            value: expr,
+        }
+    }
+
+    fn parse_if_statement(&mut self) -> Statement {
+        self.advance(); // consume 'if'
+        let condition = self.parse_expression();
+        let then_branch = Box::new(self.parse_statement());
+
+        let else_branch = if self.peek().kind.is_keyword(Keyword::Else) {
+            self.advance(); // consume 'else'
+            Some(Box::new(self.parse_statement()))
+        } else {
+            None
+        };
+
+        Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+        }
+    }
+
+    fn parse_while_statement(&mut self) -> Statement {
+        self.advance(); // consume 'while'
+        let condition = self.parse_expression();
+        let body = Box::new(self.parse_statement());
+        Statement::While { condition, body }
+    }
+
+    fn parse_block_statement(&mut self) -> Statement {
+        self.consume_delimiter(Delimiter::LeftBrace);
+        let mut statements = Vec::new();
+
+        while !self.peek().kind.is_delimiter(Delimiter::RightBrace) && !self.is_at_end() {
+            statements.push(self.parse_statement());
+        }
+
+        self.consume_delimiter(Delimiter::RightBrace);
+        Statement::Block(statements)
+    }
+
+    fn parse_function_declaration(&mut self) -> Statement {
+        self.advance(); // consume 'fn'
+
+        let name = if let TokenKind::Identifier(id) = &self.peek().kind {
+            let n = id.clone();
+            self.advance();
+            n
+        } else {
+            panic!("Expected function name");
+        };
+
+        self.consume_delimiter(Delimiter::LeftParen);
+
+        let mut parameters: Vec<Parameter> = Vec::new();
+        while !self.peek().kind.is_delimiter(Delimiter::RightParen) {
+            let param_name = if let TokenKind::Identifier(id) = &self.peek().kind {
+                let n = id.clone();
+                self.advance();
+                n
+            } else {
+                panic!("Expected parameter name");
+            };
+
+            self.consume_delimiter(Delimiter::Colon);
+            let param_type = self.parse_type();
+
+            parameters.push(Parameter::new(param_name, param_type));
+
+            if self.peek().kind.is_delimiter(Delimiter::Comma) {
+                self.advance(); // consume comma
+            }
+        }
+
+        self.consume_delimiter(Delimiter::RightParen);
+
+        let return_type = if self.peek().kind.is_operator(Operator::Arrow) {
+            self.advance();
+            Some(self.parse_type())
+        } else {
+            None
+        };
+
+        let body = Box::new(self.parse_statement()); // Usually a block
+
+        Statement::FunctionDeclaration {
+            name,
+            parameters,
+            return_type,
+            body,
         }
     }
 
@@ -310,9 +441,36 @@ impl Parser {
                 self.handle_boolean_literal()
             }
             TokenKind::Keyword(Keyword::Nil) => self.handle_nil_literal(),
-            TokenKind::Identifier(_) => self.handle_identifier(),
+            TokenKind::Identifier(name) => self.handle_identifier(name),
             TokenKind::Delimiter(Delimiter::LeftParen) => self.handle_grouped_expression(),
             _ => Expression::Nil,
+        }
+    }
+
+    fn handle_identifier(&mut self, name: String) -> Expression {
+        let identifier = name.clone();
+        self.advance();
+
+        if self.peek().kind.is_delimiter(Delimiter::LeftParen) {
+            // Function call
+            self.advance(); // consume '('
+            let mut arguments = Vec::new();
+
+            while !self.peek().kind.is_delimiter(Delimiter::RightParen) {
+                arguments.push(self.parse_expression());
+                if self.peek().kind.is_delimiter(Delimiter::Comma) {
+                    self.advance();
+                }
+            }
+
+            self.consume_delimiter(Delimiter::RightParen);
+            Expression::Call {
+                name: identifier,
+                arguments,
+            }
+        } else {
+            // Variable reference
+            Expression::Identifier(identifier)
         }
     }
 
@@ -351,16 +509,6 @@ impl Parser {
         Expression::Nil
     }
 
-    fn handle_identifier(&mut self) -> Expression {
-        if let TokenKind::Identifier(name) = &self.peek().kind {
-            let identifier = name.clone();
-            self.advance();
-            Expression::Identifier(identifier)
-        } else {
-            panic!("Expected identifier");
-        }
-    }
-
     fn handle_grouped_expression(&mut self) -> Expression {
         self.consume_delimiter(Delimiter::LeftParen);
         let expr = self.parse_expression();
@@ -396,6 +544,14 @@ impl Parser {
         let default = Token::new(TokenKind::Special(Special::Eof), Span::default());
         self.tokens
             .get(self.current)
+            .map(|thing| thing.to_owned())
+            .unwrap_or_else(|| default)
+    }
+
+    fn peek_next(&self) -> Token {
+        let default = Token::new(TokenKind::Special(Special::Eof), Span::default());
+        self.tokens
+            .get(self.current + 1)
             .map(|thing| thing.to_owned())
             .unwrap_or_else(|| default)
     }
@@ -787,6 +943,35 @@ mod tests {
                 type_annotation: Type::Nullable(Box::new(Type::String)),
                 initializer: Expression::Nil,
             }],
+        };
+
+        assert_eq!(expected, ast);
+    }
+
+    #[test]
+    pub fn parser_can_parse_assignment_statements() {
+        let mut lexer = Lexer::default();
+        lexer.source = "let x: Number = 1; x = 2;".chars().collect();
+
+        let tokens = lexer.tokenize();
+        println!("TOKENS: {:#?}", tokens);
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse();
+
+        println!("AST: {:#?}", ast);
+
+        let expected = Program {
+            statements: vec![
+                Statement::VarDeclaration {
+                    name: "x".to_string(),
+                    type_annotation: Type::Number,
+                    initializer: Expression::Number(1.),
+                },
+                Statement::Assignment {
+                    name: "x".into(),
+                    value: Expression::Number(2.),
+                },
+            ],
         };
 
         assert_eq!(expected, ast);

@@ -1,0 +1,6 @@
+fn add(a: Number, b: Number) -> Number {
+    return a + b;
+}
+
+let result: Number = add(1, 2);
+print result;
