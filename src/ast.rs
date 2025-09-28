@@ -54,7 +54,7 @@ pub struct Block {
 pub enum Statement {
     VarDeclaration {
         name: String,
-        type_annotation: Type,
+        type_annotation: Option<Type>,
         initializer: Expression,
     },
     Assignment {

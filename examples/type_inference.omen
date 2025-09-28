@@ -1,0 +1,16 @@
+fn add(a: Number?, b: Number?) -> Number? {
+    if (a == nil or b == nil) {
+        return nil;
+    }
+
+    return a + b;
+}
+
+let a: Number? = nil;
+let b = 2;
+let result = add(a, b);
+print result;
+
+let c = 1;
+let d = 2;
+print add(c, d);

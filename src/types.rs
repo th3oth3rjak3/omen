@@ -46,6 +46,137 @@ impl TypeEnvironment {
         }
         Err(format!("Undefined variable '{}'", name))
     }
+
+    /// Create a new environment with an extra scope containing the refinements.
+    /// This is used to type-check branches under refined assumptions.
+    pub fn refine_with(&self, refinements: &HashMap<String, Type>) -> TypeEnvironment {
+        let mut new_env = self.clone();
+        new_env.push_scope();
+        for (k, v) in refinements {
+            new_env.define(k.clone(), v.clone());
+        }
+        new_env
+    }
+
+    /// Update an existing binding (searching from innermost scope outward).
+    /// Returns true if we found and updated an existing binding, false otherwise.
+    /// Use this to _permanently_ update the current environment after a guard.
+    pub fn update_binding(&mut self, name: &str, new_type: Type) -> bool {
+        for scope in self.scopes.iter_mut().rev() {
+            if scope.contains_key(name) {
+                scope.insert(name.to_string(), new_type);
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn analyze_condition(
+    cond: &Expression,
+    env: &TypeEnvironment,
+) -> (HashMap<String, Type>, HashMap<String, Type>) {
+    fn merge_maps(a: &mut HashMap<String, Type>, b: &HashMap<String, Type>) {
+        for (k, v) in b {
+            match a.get(k) {
+                Some(existing) if existing != v => {
+                    // conflict -> remove refinement (conservative)
+                    a.remove(k);
+                }
+                None => {
+                    a.insert(k.clone(), v.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    match cond {
+        Expression::Unary {
+            operator: UnaryOperator::Not,
+            operand,
+        } => {
+            let (t, f) = analyze_condition(operand, env);
+            (f, t)
+        }
+
+        Expression::Binary {
+            left,
+            operator,
+            right,
+        } => match operator {
+            BinaryOperator::LogicalAnd => {
+                let (lt, lf) = analyze_condition(left, env);
+                let (rt, rf) = analyze_condition(right, env);
+                // true: both true refinements apply
+                let mut true_ref = lt.clone();
+                merge_maps(&mut true_ref, &rt);
+                // conservative for false
+                let false_ref = HashMap::new();
+                (true_ref, false_ref)
+            }
+            BinaryOperator::LogicalOr => {
+                let (lt, lf) = analyze_condition(left, env);
+                let (rt, rf) = analyze_condition(right, env);
+                // false: both false refinements apply
+                let mut false_ref = lf.clone();
+                merge_maps(&mut false_ref, &rf);
+                let true_ref = HashMap::new();
+                (true_ref, false_ref)
+            }
+            BinaryOperator::Equal | BinaryOperator::NotEqual => {
+                // handle `ident == nil` and `nil == ident` patterns
+                // get an identifier name if present
+                let mut true_map = HashMap::new();
+                let mut false_map = HashMap::new();
+
+                let try_ident_nil =
+                    |ident_expr: &Expression,
+                     other_expr: &Expression,
+                     is_equal: bool,
+                     env: &TypeEnvironment,
+                     true_map: &mut HashMap<String, Type>,
+                     false_map: &mut HashMap<String, Type>| {
+                        if let Expression::Identifier(name) = ident_expr {
+                            if let Expression::Nil = other_expr {
+                                // Lookup the declared type if possible
+                                if let Ok(var_type) = env.get(name) {
+                                    match var_type {
+                                        Type::Nullable(inner) => {
+                                            if is_equal {
+                                                // ident == nil => ident is Nil when true; non-null when false
+                                                true_map.insert(name.clone(), Type::Nil);
+                                                false_map.insert(name.clone(), (*inner).clone());
+                                            } else {
+                                                // ident != nil => ident is non-null when true; nil when false
+                                                true_map.insert(name.clone(), (*inner).clone());
+                                                false_map.insert(name.clone(), Type::Nil);
+                                            }
+                                        }
+                                        _ => {
+                                            // comparing non-nullable to nil is rare/ill-typed; be conservative
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    };
+
+                if *operator == BinaryOperator::Equal {
+                    try_ident_nil(left, right, true, env, &mut true_map, &mut false_map);
+                    try_ident_nil(right, left, true, env, &mut true_map, &mut false_map);
+                } else {
+                    try_ident_nil(left, right, false, env, &mut true_map, &mut false_map);
+                    try_ident_nil(right, left, false, env, &mut true_map, &mut false_map);
+                }
+
+                (true_map, false_map)
+            }
+            _ => (HashMap::new(), HashMap::new()),
+        },
+
+        _ => (HashMap::new(), HashMap::new()),
+    }
 }
 
 pub fn type_check_program(program: &Program) -> Result<(), String> {
@@ -61,7 +192,7 @@ fn type_check_statement(
     stmt: &Statement,
     env: &mut TypeEnvironment,
     function_return_type: Option<&Type>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     match stmt {
         Statement::VarDeclaration {
             name,
@@ -69,16 +200,30 @@ fn type_check_statement(
             initializer,
         } => {
             let init_type = type_check_expression(initializer, env)?;
-            if !init_type.is_assignable_to(type_annotation) {
+
+            let var_type: Type;
+
+            if let Some(type_annotation) = type_annotation {
+                // user provided one, so let's use that.
+                var_type = type_annotation.to_owned();
+            } else {
+                if init_type == Type::Nil {
+                    return Err("Cannot infer type from 'nil'. Use a type annotation.".into());
+                }
+                var_type = init_type.clone();
+            }
+
+            if !init_type.is_assignable_to(&var_type) {
                 return Err(format!(
                     "Cannot assign {} to variable '{}' of type {}",
                     type_to_string(&init_type),
                     name,
-                    type_to_string(type_annotation)
+                    type_to_string(&var_type)
                 ));
             }
-            env.define(name.clone(), type_annotation.clone());
-            Ok(())
+
+            env.define(name.clone(), var_type);
+            Ok(false)
         }
         Statement::Assignment { name, value } => {
             let var_type = env.get(name)?;
@@ -91,15 +236,15 @@ fn type_check_statement(
                     type_to_string(&var_type)
                 ));
             }
-            Ok(())
+            Ok(false)
         }
         Statement::ExpressionStatement(expr) => {
             type_check_expression(expr, env)?;
-            Ok(())
+            Ok(false)
         }
         Statement::Print(expr) => {
             type_check_expression(expr, env)?;
-            Ok(())
+            Ok(false)
         }
         Statement::If {
             condition,
@@ -114,11 +259,36 @@ fn type_check_statement(
                 ));
             }
 
-            type_check_statement(then_branch, env, function_return_type)?;
-            if let Some(else_stmt) = else_branch {
-                type_check_statement(else_stmt, env, function_return_type)?;
+            // analyze condition to produce refinements for true / false cases
+            let (true_ref, false_ref) = analyze_condition(condition, env);
+
+            // typecheck then under "true" refinements
+            let mut then_env = env.refine_with(&true_ref);
+            let then_exits =
+                type_check_statement(then_branch, &mut then_env, function_return_type)?;
+
+            // typecheck else under "false" refinements if present
+            let (else_exits, _else_env) = if let Some(else_stmt) = else_branch {
+                let mut else_env = env.refine_with(&false_ref);
+                let e_exits = type_check_statement(else_stmt, &mut else_env, function_return_type)?;
+                (e_exits, Some(else_env))
+            } else {
+                (false, None)
+            };
+
+            // Common guard-with-early-return pattern:
+            // if (cond) { return ... }   // then_exits == true and no else
+            // => code after if runs under the *false* refinement (cond == false)
+            if then_exits && else_branch.is_none() {
+                // permanently apply false refinements to current env for subsequent code
+                for (name, ty) in false_ref {
+                    // only update binding if the variable already exists in some parent scope
+                    let _ = env.update_binding(&name, ty);
+                }
             }
-            Ok(())
+
+            // The if-statement as a whole "always exits" only if both branches exit
+            Ok(then_exits && else_exits)
         }
         Statement::While { condition, body } => {
             let condition_type = type_check_expression(condition, env)?;
@@ -129,14 +299,18 @@ fn type_check_statement(
                 ));
             }
             type_check_statement(body, env, function_return_type)?;
-            Ok(())
+            Ok(false)
         }
         Statement::Block(statements) => {
             for stmt in statements {
-                type_check_statement(stmt, env, function_return_type)?;
+                let exited = type_check_statement(stmt, env, function_return_type)?;
+                if exited {
+                    return Ok(true);
+                }
             }
-            Ok(())
+            Ok(false)
         }
+
         Statement::FunctionDeclaration {
             name,
             parameters,
@@ -162,7 +336,7 @@ fn type_check_statement(
             type_check_statement(body, env, return_type.as_ref())?; // Pass return type context
             env.pop_scope();
 
-            Ok(())
+            Ok(false)
         }
         Statement::Return(expr_opt) => {
             match (expr_opt, function_return_type) {
@@ -186,7 +360,7 @@ fn type_check_statement(
                     // Void return from void function - OK
                 }
             }
-            Ok(())
+            Ok(true)
         }
     }
 }
@@ -271,7 +445,12 @@ fn type_check_expression(expr: &Expression, env: &TypeEnvironment) -> Result<Typ
                 }
                 BinaryOperator::Equal | BinaryOperator::NotEqual => {
                     // Allow equality comparison between same types
-                    if left_type == right_type {
+                    // Also allow comparing Nullable(T) with Nil (or Nil with Nullable(T))
+                    let ok = left_type == right_type
+                        || matches!((&left_type, &right_type), (Type::Nullable(_), Type::Nil))
+                        || matches!((&left_type, &right_type), (Type::Nil, Type::Nullable(_)));
+
+                    if ok {
                         Ok(Type::Bool)
                     } else {
                         Err(format!(
@@ -281,6 +460,7 @@ fn type_check_expression(expr: &Expression, env: &TypeEnvironment) -> Result<Typ
                         ))
                     }
                 }
+
                 BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr => {
                     if left_type == Type::Bool && right_type == Type::Bool {
                         Ok(Type::Bool)
@@ -471,10 +651,7 @@ impl Type {
             // nil can be assigned to any nullable type
             (Type::Nil, Type::Nullable(_)) => true,
 
-            (Type::Nullable(a), b) if !b.is_nullable() => {
-                println!("a {:#?}, b {:#?}", a, b);
-                false
-            }
+            (Type::Nullable(_), b) if !b.is_nullable() => false,
             (Type::Nullable(a), Type::Nullable(b)) => a.is_assignable_to(b),
 
             // Allow non-null assignment to nullable of same type.

@@ -76,6 +76,7 @@ impl Parser {
 
     fn parse_var_declaration(&mut self) -> Statement {
         self.advance(); // consume 'let'
+        let mut type_annotation: Option<Type> = None;
 
         // Parse variable name
         let name = if let TokenKind::Identifier(id) = &self.peek().kind {
@@ -86,14 +87,11 @@ impl Parser {
             panic!("Expected identifier after 'let'");
         };
 
-        // Require colon
-        if !self.peek().kind.is_delimiter(Delimiter::Colon) {
-            panic!("Expected ':' after variable name");
+        // if we have a colon, then there is a type declaration
+        if self.peek().kind.is_delimiter(Delimiter::Colon) {
+            self.advance(); // consume ':'
+            type_annotation = Some(self.parse_type());
         }
-        self.advance(); // consume ':'
-
-        // Parse type annotation (required)
-        let type_annotation = self.parse_type();
 
         // Require equals sign
         if !self.peek().kind.is_operator(Operator::Equal) {
@@ -838,7 +836,7 @@ mod tests {
         let expected = Program {
             statements: vec![Statement::VarDeclaration {
                 name: "x".to_string(),
-                type_annotation: Type::Number,
+                type_annotation: Some(Type::Number),
                 initializer: Expression::Number(42.0),
             }],
         };
@@ -858,7 +856,7 @@ mod tests {
         let expected = Program {
             statements: vec![Statement::VarDeclaration {
                 name: "flag".to_string(),
-                type_annotation: Type::Bool,
+                type_annotation: Some(Type::Bool),
                 initializer: Expression::Bool(true),
             }],
         };
@@ -881,7 +879,7 @@ mod tests {
         let expected = Program {
             statements: vec![Statement::VarDeclaration {
                 name: "name".to_string(),
-                type_annotation: Type::String,
+                type_annotation: Some(Type::String),
                 initializer: Expression::String("hello".to_string()), // Assuming you add string literals
             }],
         };
@@ -901,7 +899,7 @@ mod tests {
         let expected = Program {
             statements: vec![Statement::VarDeclaration {
                 name: "result".to_string(),
-                type_annotation: Type::Number,
+                type_annotation: Some(Type::Number),
                 initializer: Expression::Binary {
                     left: Box::new(Expression::Number(5.0)),
                     operator: BinaryOperator::Add,
@@ -940,7 +938,7 @@ mod tests {
         let expected = Program {
             statements: vec![Statement::VarDeclaration {
                 name: "maybe".to_string(),
-                type_annotation: Type::Nullable(Box::new(Type::String)),
+                type_annotation: Some(Type::Nullable(Box::new(Type::String))),
                 initializer: Expression::Nil,
             }],
         };
@@ -964,7 +962,7 @@ mod tests {
             statements: vec![
                 Statement::VarDeclaration {
                     name: "x".to_string(),
-                    type_annotation: Type::Number,
+                    type_annotation: Some(Type::Number),
                     initializer: Expression::Number(1.),
                 },
                 Statement::Assignment {
