@@ -2270,7 +2270,6 @@ impl Interpreter {
 
                 // Execute function body
                 let result = self.execute_statement(&body);
-                println!("FUNCTION RESULT: {:#?}", result);
 
                 // Restore environment
                 self.environment = saved_env;
