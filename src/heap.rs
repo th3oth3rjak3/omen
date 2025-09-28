@@ -184,7 +184,7 @@ mod tests {
         // obj1 should still be alive
         assert!(heap.objects.is_some());
         assert!(
-            heap.objects.as_ref().unwrap().borrow().marked == false
+            !heap.objects.as_ref().unwrap().borrow().marked
                 || heap.objects.as_ref().unwrap().borrow().object == Object::String("one".into())
         );
 

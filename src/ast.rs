@@ -1,17 +1,11 @@
 use crate::types::Type;
 
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 pub struct Program {
     pub statements: Vec<Statement>,
 }
 
-impl Default for Program {
-    fn default() -> Self {
-        Self {
-            statements: Default::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDecl {

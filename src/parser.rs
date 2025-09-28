@@ -414,10 +414,10 @@ impl Parser {
         if kind.is_operator(Operator::Bang) {
             self.advance();
             let expr = self.parse_unary();
-            return Expression::Unary {
+            Expression::Unary {
                 operator: UnaryOperator::Not,
                 operand: Box::new(expr),
-            };
+            }
         } else if kind.is_operator(Operator::Minus) {
             self.advance();
             let expr = self.parse_unary();
@@ -534,7 +534,7 @@ impl Parser {
 
         // TODO: add error handling to parser, we'll just panic instead.
         if !ok {
-            panic!("Expected {:#?}, Got: {:#?}", expected, kind);
+            panic!("Expected {expected:#?}, Got: {kind:#?}");
         }
     }
 
@@ -566,8 +566,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_simple_numbers() {
-        let mut lexer = Lexer::default();
-        lexer.source = "1.23;".chars().collect();
+        let source = "1.23;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -582,8 +582,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_simple_booleans() {
-        let mut lexer = Lexer::default();
-        lexer.source = "true;".chars().collect();
+        let source = "true;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -597,8 +597,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_nil_literals() {
-        let mut lexer = Lexer::default();
-        lexer.source = "nil;".chars().collect();
+        let source = "nil;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -612,8 +612,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_basic_groupings() {
-        let mut lexer = Lexer::default();
-        lexer.source = "(true);".chars().collect();
+        let source = "(true);";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -628,8 +628,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_unary_logical_not_expressions() {
-        let mut lexer = Lexer::default();
-        lexer.source = "!true;".chars().collect();
+        let source = "!true;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -647,8 +647,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_unary_negation_expressions() {
-        let mut lexer = Lexer::default();
-        lexer.source = "-5;".chars().collect();
+        let source = "-5;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -666,8 +666,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_simple_binary_factor() {
-        let mut lexer = Lexer::default();
-        lexer.source = "1 * 2;".chars().collect();
+        let source = "1 * 2;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -686,8 +686,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_simple_binary_term() {
-        let mut lexer = Lexer::default();
-        lexer.source = "1 - 2;".chars().collect();
+        let source = "1 - 2;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -706,8 +706,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_simple_comparison() {
-        let mut lexer = Lexer::default();
-        lexer.source = "5 < 10;".chars().collect();
+        let source = "5 < 10;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -726,8 +726,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_equality_when_equal() {
-        let mut lexer = Lexer::default();
-        lexer.source = "5 == 10;".chars().collect();
+        let source = "5 == 10;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -746,8 +746,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_equality_when_not_equal() {
-        let mut lexer = Lexer::default();
-        lexer.source = "5 != 10;".chars().collect();
+        let source = "5 != 10;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -766,8 +766,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_basic_identifiers() {
-        let mut lexer = Lexer::default();
-        lexer.source = "someIdent != 10;".chars().collect();
+        let source = "someIdent != 10;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -786,8 +786,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_logical_and() {
-        let mut lexer = Lexer::default();
-        lexer.source = "true and false;".chars().collect();
+        let source = "true and false;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -806,8 +806,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_logical_or() {
-        let mut lexer = Lexer::default();
-        lexer.source = "false or true;".chars().collect();
+        let source = "false or true;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -826,8 +826,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_let_with_number() {
-        let mut lexer = Lexer::default();
-        lexer.source = "let x: Number = 42;".chars().collect();
+        let source = "let x: Number = 42;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -846,8 +846,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_let_with_bool() {
-        let mut lexer = Lexer::default();
-        lexer.source = "let flag: Bool = true;".chars().collect();
+        let source = "let flag: Bool = true;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -866,12 +866,12 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_let_with_string() {
-        let mut lexer = Lexer::default();
-        lexer.source = r#"let name: String = "hello";"#.chars().collect();
+        let source = r#"let name: String = "hello";"#;
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
 
-        println!("{:#?}", tokens);
+        println!("{tokens:#?}");
 
         let mut parser = Parser::new(tokens);
         let ast = parser.parse();
@@ -889,8 +889,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_let_with_expression_initializer() {
-        let mut lexer = Lexer::default();
-        lexer.source = "let result: Number = 5 + 3 * 2;".chars().collect();
+        let source = "let result: Number = 5 + 3 * 2;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -918,8 +918,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "Cannot declare variables of type Nil")]
     pub fn parser_rejects_nil_type_declaration() {
-        let mut lexer = Lexer::default();
-        lexer.source = "let invalid: Nil = nil;".chars().collect();
+        let source = "let invalid: Nil = nil;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -928,8 +928,8 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_let_with_nullable_type() {
-        let mut lexer = Lexer::default();
-        lexer.source = "let maybe: String? = nil;".chars().collect();
+        let source = "let maybe: String? = nil;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
@@ -948,15 +948,15 @@ mod tests {
 
     #[test]
     pub fn parser_can_parse_assignment_statements() {
-        let mut lexer = Lexer::default();
-        lexer.source = "let x: Number = 1; x = 2;".chars().collect();
+        let source = "let x: Number = 1; x = 2;";
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
-        println!("TOKENS: {:#?}", tokens);
+        println!("TOKENS: {tokens:#?}");
         let mut parser = Parser::new(tokens);
         let ast = parser.parse();
 
-        println!("AST: {:#?}", ast);
+        println!("AST: {ast:#?}");
 
         let expected = Program {
             statements: vec![

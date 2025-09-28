@@ -15,6 +15,12 @@ pub struct TypeEnvironment {
     scopes: Vec<HashMap<String, Type>>,
 }
 
+impl Default for TypeEnvironment {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TypeEnvironment {
     pub fn new() -> Self {
         Self {
@@ -44,7 +50,7 @@ impl TypeEnvironment {
                 return Ok(type_.clone());
             }
         }
-        Err(format!("Undefined variable '{}'", name))
+        Err(format!("Undefined variable '{name}'"))
     }
 
     /// Create a new environment with an extra scope containing the refinements.
@@ -106,8 +112,8 @@ fn analyze_condition(
             right,
         } => match operator {
             BinaryOperator::LogicalAnd => {
-                let (lt, lf) = analyze_condition(left, env);
-                let (rt, rf) = analyze_condition(right, env);
+                let (lt, _lf) = analyze_condition(left, env);
+                let (rt, _rf) = analyze_condition(right, env);
                 // true: both true refinements apply
                 let mut true_ref = lt.clone();
                 merge_maps(&mut true_ref, &rt);
@@ -116,8 +122,8 @@ fn analyze_condition(
                 (true_ref, false_ref)
             }
             BinaryOperator::LogicalOr => {
-                let (lt, lf) = analyze_condition(left, env);
-                let (rt, rf) = analyze_condition(right, env);
+                let (_lt, lf) = analyze_condition(left, env);
+                let (_rt, rf) = analyze_condition(right, env);
                 // false: both false refinements apply
                 let mut false_ref = lf.clone();
                 merge_maps(&mut false_ref, &rf);
@@ -140,22 +146,15 @@ fn analyze_condition(
                         if let Expression::Identifier(name) = ident_expr {
                             if let Expression::Nil = other_expr {
                                 // Lookup the declared type if possible
-                                if let Ok(var_type) = env.get(name) {
-                                    match var_type {
-                                        Type::Nullable(inner) => {
-                                            if is_equal {
-                                                // ident == nil => ident is Nil when true; non-null when false
-                                                true_map.insert(name.clone(), Type::Nil);
-                                                false_map.insert(name.clone(), (*inner).clone());
-                                            } else {
-                                                // ident != nil => ident is non-null when true; nil when false
-                                                true_map.insert(name.clone(), (*inner).clone());
-                                                false_map.insert(name.clone(), Type::Nil);
-                                            }
-                                        }
-                                        _ => {
-                                            // comparing non-nullable to nil is rare/ill-typed; be conservative
-                                        }
+                                if let Ok(Type::Nullable(inner)) = env.get(name) {
+                                    if is_equal {
+                                        // ident == nil => ident is Nil when true; non-null when false
+                                        true_map.insert(name.clone(), Type::Nil);
+                                        false_map.insert(name.clone(), (*inner).clone());
+                                    } else {
+                                        // ident != nil => ident is non-null when true; nil when false
+                                        true_map.insert(name.clone(), (*inner).clone());
+                                        false_map.insert(name.clone(), Type::Nil);
                                     }
                                 }
                             }
@@ -494,7 +493,7 @@ fn type_check_expression(expr: &Expression, env: &TypeEnvironment) -> Result<Typ
                 for (i, arg) in arguments.iter().enumerate() {
                     let arg_type = type_check_expression(arg, env)?;
                     if !arg_type.is_assignable_to(&params[i]) {
-                        return Err(format!("Argument {} type mismatch", i));
+                        return Err(format!("Argument {i} type mismatch"));
                     }
                 }
 
@@ -504,7 +503,7 @@ fn type_check_expression(expr: &Expression, env: &TypeEnvironment) -> Result<Typ
                     Ok(Type::Nil) // Void function
                 }
             } else {
-                Err(format!("'{}' is not a function", name))
+                Err(format!("'{name}' is not a function"))
             }
         }
     }
@@ -518,7 +517,7 @@ fn type_to_string(type_: &Type) -> String {
         Type::Nil => "Nil".to_string(),
         Type::Class(name) => name.clone(),
         Type::Nullable(inner) => format!("{}?", type_to_string(inner)),
-        _ => format!("{:?}", type_), // For complex types not yet implemented
+        _ => format!("{type_:?}"), // For complex types not yet implemented
     }
 }
 
@@ -644,7 +643,7 @@ impl Type {
                         .read()
                         .unwrap()
                         .get(a_name)
-                        .map_or(false, |class_info| class_info.is_subtype_of(b_name))
+                        .is_some_and(|class_info| class_info.is_subtype_of(b_name))
                 }
             }
 
@@ -655,7 +654,7 @@ impl Type {
             (Type::Nullable(a), Type::Nullable(b)) => a.is_assignable_to(b),
 
             // Allow non-null assignment to nullable of same type.
-            (a, Type::Nullable(nullable_inner)) => a.is_assignable_to(&nullable_inner),
+            (a, Type::Nullable(nullable_inner)) => a.is_assignable_to(nullable_inner),
 
             (a, b) if a == b => true,
 
@@ -1158,7 +1157,7 @@ mod tests {
         };
 
         // This SHOULD work - more general function can substitute for more specific one
-        assert_eq!(true, nullable_param.is_assignable_to(&non_nullable_param));
+        assert!(nullable_param.is_assignable_to(&non_nullable_param));
     }
 
     #[test]

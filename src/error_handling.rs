@@ -26,19 +26,12 @@ impl Position {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[derive(Default)]
 pub struct Span {
     pub start: Position,
     pub end: Option<Position>,
 }
 
-impl Default for Span {
-    fn default() -> Self {
-        Self {
-            start: Default::default(),
-            end: None,
-        }
-    }
-}
 
 impl Span {
     pub fn new(start: Position, end: Option<Position>) -> Self {

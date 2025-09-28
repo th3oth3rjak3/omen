@@ -13,19 +13,17 @@ pub struct Lexer {
     pub line_offset: usize,
 }
 
-impl Default for Lexer {
-    fn default() -> Self {
+impl Lexer {
+    pub fn new(source: impl Into<String>) -> Self {
         Self {
-            source: Vec::new(),
+            source: source.into().chars().collect(),
             line: 1,
             column: 0,
             offset: 0,
             line_offset: 0,
         }
     }
-}
 
-impl Lexer {
     pub fn tokenize(&mut self) -> Vec<Token> {
         let mut tokens = Vec::new();
 
@@ -178,7 +176,7 @@ impl Lexer {
         let tok = Token::new(TokenKind::String(literal), span);
 
         self.advance(); // advance over the " for the next token
-        return tok;
+        tok
     }
 
     fn position(&mut self) -> Position {
@@ -197,7 +195,7 @@ impl Lexer {
                 self.column = 0;
                 self.line_offset = self.offset;
             }
-            '\0' => return,
+            '\0' => (),
             _ => {
                 self.offset += 1;
                 self.column += 1;
@@ -218,7 +216,7 @@ impl Lexer {
             return '\0';
         }
 
-        return self.source[offset];
+        self.source[offset]
     }
 
     fn make_error_token(&mut self, err: String) -> Token {
@@ -280,8 +278,7 @@ mod tests {
     #[test]
     pub fn lexer_can_tokenize_all_delimiters() {
         let source = "()[]{}:;,";
-        let mut lexer = Lexer::default();
-        lexer.source = source.chars().collect();
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
@@ -317,8 +314,7 @@ mod tests {
             false    
         "#;
 
-        let mut lexer = Lexer::default();
-        lexer.source = source.chars().collect();
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
@@ -343,8 +339,7 @@ mod tests {
     #[test]
     pub fn lexer_can_tokenize_all_operators() {
         let source = "+ += - -= * *= / /= = == ! != < <= > >= . -> => ?";
-        let mut lexer = Lexer::default();
-        lexer.source = source.chars().collect();
+        let mut lexer = Lexer::new(source);
 
         let tokens = lexer.tokenize();
         assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
@@ -374,8 +369,7 @@ mod tests {
     #[test]
     pub fn lexer_can_produce_number_tokens() {
         let source = "1 1.2 1.0 432";
-        let mut lexer = Lexer::default();
-        lexer.source = source.chars().collect();
+        let mut lexer = Lexer::new(source);
         let tokens = lexer.tokenize();
         assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
 
@@ -387,15 +381,14 @@ mod tests {
 
     #[test]
     pub fn lexer_produces_eof_token_for_empty_input() {
-        let mut lexer = Lexer::default();
+        let mut lexer = Lexer::new("");
         let tokens = lexer.tokenize();
         assert!(!tokens.is_empty() && tokens.last().unwrap().kind.is_special(Special::Eof));
     }
 
     #[test]
     pub fn lexer_handles_string_literals() {
-        let mut lexer = Lexer::default();
-        lexer.source = r#""a raw string""#.chars().collect();
+        let mut lexer = Lexer::new(r#""a raw string""#);
         let tokens = lexer.tokenize();
         assert_eq!(2, tokens.len());
         assert_eq!(TokenKind::String("a raw string".into()), tokens[0].kind);

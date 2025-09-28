@@ -12,6 +12,12 @@ pub struct Environment {
     pub scopes: Vec<Rc<RefCell<HashMap<String, Value>>>>,
 }
 
+impl Default for Environment {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Environment {
     pub fn new() -> Self {
         Self {
@@ -41,7 +47,7 @@ impl Environment {
                 return Ok(value.clone());
             }
         }
-        Err(format!("Undefined variable '{}'", name))
+        Err(format!("Undefined variable '{name}'"))
     }
 
     pub fn assign(&mut self, name: &str, value: Value) -> Result<Option<Value>, String> {
@@ -51,13 +57,19 @@ impl Environment {
                 return Ok(None);
             }
         }
-        Err(format!("Undefined variable '{}'", name))
+        Err(format!("Undefined variable '{name}'"))
     }
 }
 
 pub struct Interpreter {
     environment: Environment,
     heap: Heap,
+}
+
+impl Default for Interpreter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Interpreter {
@@ -211,10 +223,10 @@ impl Interpreter {
                                 closure_env,
                                 ..
                             }) => (parameters.clone(), body.clone(), closure_env.clone()),
-                            _ => return Err(format!("'{}' is not a function", name)),
+                            _ => return Err(format!("'{name}' is not a function")),
                         }
                     }
-                    _ => return Err(format!("'{}' is not a function", name)),
+                    _ => return Err(format!("'{name}' is not a function")),
                 };
 
                 let (parameters, body, closure_env) = function;
@@ -279,7 +291,7 @@ impl Interpreter {
             // Arithmetic operators
             BinaryOperator::Add => match (left, right) {
                 (Value::Number(l), Value::Number(r)) => Ok(Value::Number(l + r)),
-                (Value::String(l), Value::String(r)) => Ok(Value::String(format!("{}{}", l, r))),
+                (Value::String(l), Value::String(r)) => Ok(Value::String(format!("{l}{r}"))),
                 _ => Err("Cannot add incompatible types".to_string()),
             },
             BinaryOperator::Subtract => match (left, right) {
